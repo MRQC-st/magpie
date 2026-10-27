@@ -1,0 +1,43 @@
+{
+  "name": "magpie-lobster-auth",
+  "version": "0.2.0",
+  "description": "magpie provider plugin: NetEase Youdao LobsterAI (有道龙虾) — merged build (reference plugin + reverse-engineered capabilities + server-side zero-interaction sign-in)",
+  "type": "module",
+  "main": "./index.mjs",
+  "exports": "./index.mjs",
+  "files": [
+    "index.mjs",
+    "lib",
+    "README.md",
+    "README.zh-CN.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "magpie",
+    "magpie-plugin",
+    "lobster",
+    "lobsterai",
+    "youdao",
+    "opencode",
+    "opencode-plugin"
+  ],
+  "license": "MIT",
+  "author": "Jasery <jaserydev@163.com>",
+  "contributors": [
+    "Jasery <jaserydev@163.com>"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Jasery/opencode-lobster-auth.git"
+  },
+  "homepage": "https://github.com/Jasery/opencode-lobster-auth#readme",
+  "bugs": "https://github.com/Jasery/opencode-lobster-auth/issues",
+  "scripts": {
+    "test": "bun test",
+    "test:node": "node --test --test-force-exit \"test/**/*.test.mjs\""
+  },
+  "magpie": {
+    "maxConcurrency": 8,
+    "icon": "https://lobsterai.youdao.com/portal/lobsterai-logo.png"
+  }
+}

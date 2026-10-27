@@ -1,0 +1,205 @@
+import { test, expect } from "./harness.mjs"
+import { errorOf, statusFor, makeFetch } from "../lib/proxy.mjs"
+
+test("errorOf reads the proxy's nested error envelope", () => {
+  expect(errorOf('{"type":"error","error":{"type":"proxy_error","message":"不支持的模型: x","code":40300}}'))
+    .toEqual({ code: 40300, message: "不支持的模型: x" })
+})
+
+test("errorOf tolerates junk", () => {
+  expect(errorOf("nope")).toEqual({ code: 0, message: "" })
+})
+
+test("statusFor maps the observed codes", () => {
+  expect(statusFor(40100, "登录已过期，请重新登录")).toBe(401)
+  expect(statusFor(40300, "不支持的模型: x")).toBe(403)
+  expect(statusFor(42900, "请求过于频繁")).toBe(429)
+  expect(statusFor(42900, "rate limited")).toBe(429)
+  expect(statusFor(12345, "whatever")).toBe(400)
+})
+
+const sseResponse = (lines) => new Response(
+  new ReadableStream({
+    start(c) {
+      for (const l of lines) c.enqueue(new TextEncoder().encode(l))
+      c.close()
+    },
+  }),
+  { status: 200, headers: { "content-type": "text/event-stream" } },
+)
+
+test("an event:error in a 200 becomes a real non-2xx", async () => {
+  const f = makeFetch({
+    getAuth: async () => ({ type: "api", key: "tok" }),
+    tokenOf: async (a) => a.key,
+    profileOf: () => undefined,
+    call: async () => sseResponse([
+      'event: error\ndata: {"type":"error","error":{"message":"不支持的模型: x","code":40300}}\n\n',
+    ]),
+  })
+  const res = await f("https://up/v1/chat/completions", {
+    method: "POST",
+    body: JSON.stringify({ model: "x", stream: true, messages: [] }),
+  })
+  expect(res.status).toBe(403)
+  expect((await res.json()).error.message).toContain("不支持的模型")
+})
+
+test("a lapsed sign-in is reported as 401 with X-Magpie-Sign-In", async () => {
+  const f = makeFetch({
+    getAuth: async () => ({ type: "api", key: "tok" }),
+    tokenOf: async (a) => a.key,
+    profileOf: () => undefined,
+    call: async () => sseResponse([
+      'event: error\ndata: {"type":"error","error":{"message":"登录已过期，请重新登录","code":40100}}\n\n',
+    ]),
+  })
+  const res = await f("https://up/v1/chat/completions", {
+    method: "POST", body: JSON.stringify({ model: "m", stream: true, messages: [] }),
+  })
+  expect(res.status).toBe(401)
+  expect(res.headers.get("X-Magpie-Sign-In")).toBe("expired")
+})
+
+test("a good answer is reassembled for a non-streaming caller", async () => {
+  let seen = null
+  const f = makeFetch({
+    getAuth: async () => ({ type: "api", key: "tok" }),
+    tokenOf: async (a) => a.key,
+    profileOf: () => ({ options: [{ level: "off", openclawLevel: "off" }], defaultLevel: "off" }),
+    call: async (url, init) => {
+      seen = JSON.parse(init.body)
+      return sseResponse([
+        'data: {"id":"c","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}\n\n',
+        "data: [DONE]\n\n",
+      ])
+    },
+  })
+  const res = await f("https://up/v1/chat/completions", {
+    method: "POST",
+    body: JSON.stringify({ model: "m", stream: false, messages: [], reasoning_effort: "high" }),
+  })
+  expect(res.headers.get("content-type")).toBe("application/json")
+  expect((await res.json()).choices[0].message.content).toBe("hi")
+  // 成功要带 kept，magpie 才会清掉账号上的失效标记
+  expect(res.headers.get("X-Magpie-Sign-In")).toBe("kept")
+  // 请求体被改写：私有字段写入，档位标记清除
+  expect(seen.lobsterai_options).toEqual({ version: 1, thinking: { level: "high" } })
+  expect(seen.reasoning_effort).toBeUndefined()
+})
+
+// 回归：没有档位表的模型（29 个里的 21 个）不能收到 lobsterai_options，
+// 否则上游报 code 4000 直接拒答。
+test("a model without a thinking profile gets no lobsterai_options", async () => {
+  let seen = null
+  const f = makeFetch({
+    getAuth: async () => ({ type: "api", key: "tok" }),
+    tokenOf: async (a) => a.key,
+    profileOf: () => undefined,
+    call: async (url, init) => {
+      seen = JSON.parse(init.body)
+      return sseResponse([
+        'data: {"id":"c","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}\n\n',
+        "data: [DONE]\n\n",
+      ])
+    },
+  })
+  const res = await f("https://up/v1/chat/completions", {
+    method: "POST",
+    body: JSON.stringify({ model: "qwen3.8-flash", stream: false, messages: [] }),
+  })
+  expect(res.status).toBe(200)
+  expect("lobsterai_options" in seen).toBe(false)
+})
+
+// deepseek-flash 的 thinkingConfig（实测）。注意 max 的 openclawLevel 是 xhigh。
+const DS_PROFILE = {
+  options: [
+    { level: "off", openclawLevel: "off" },
+    { level: "high", openclawLevel: "high" },
+    { level: "max", openclawLevel: "xhigh" },
+  ],
+  defaultLevel: "high",
+}
+
+const okStream = () => sseResponse([
+  'data: {"id":"c","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}\n\n',
+  "data: [DONE]\n\n",
+])
+
+async function bodySeenFor(body, profile) {
+  let seen = null
+  const f = makeFetch({
+    getAuth: async () => ({ type: "api", key: "tok" }),
+    tokenOf: async (a) => a.key,
+    profileOf: () => profile,
+    call: async (url, init) => { seen = JSON.parse(init.body); return okStream() },
+  })
+  await f("https://up/v1/chat/completions", { method: "POST", body: JSON.stringify(body) })
+  return seen
+}
+
+// 端到端锁：magpie 下发的是它自己阶梯里的 "none"，插件必须换成上游的 "off"。
+// 这条曾经是坏的 —— 变体名用了 "off"，magpie 够不着，最低档永远传不过来。
+test("magpie's none reaches the wire as off", async () => {
+  const seen = await bodySeenFor(
+    { model: "deepseek-flash", stream: false, messages: [], reasoning_effort: "none" },
+    DS_PROFILE,
+  )
+  expect(seen.lobsterai_options).toEqual({ version: 1, thinking: { level: "off" } })
+  // 上游不认识 "none"，翻译完就不要再把 magpie 的叫法透传下去
+  expect(seen.reasoning_effort).toBeUndefined()
+})
+
+test("magpie's xhigh still maps to the model's max", async () => {
+  const seen = await bodySeenFor(
+    { model: "deepseek-flash", stream: false, messages: [], reasoning_effort: "xhigh" },
+    DS_PROFILE,
+  )
+  expect(seen.lobsterai_options).toEqual({ version: 1, thinking: { level: "max" } })
+})
+
+// 没翻译成功时不能把 magpie 下发的档位名删掉：上游自己就认 reasoning_effort，
+// 删掉等于白扔一个本来能用的控制。
+test("a model with no thinking profile keeps reasoning_effort", async () => {
+  const seen = await bodySeenFor(
+    { model: "qwen3.8-flash", stream: false, messages: [], reasoning_effort: "high" },
+    undefined,
+  )
+  expect("lobsterai_options" in seen).toBe(false)
+  expect(seen.reasoning_effort).toBe("high")
+})
+
+// 桌面端导入的账号不存 token，每次现读；读不到就是账号失效。
+// 这里不能让请求带着空 token 发出去 —— 那会被上游当成匿名请求。
+test("a resolver that cannot read the token reports a lapsed account", async () => {
+  let called = false
+  const f = makeFetch({
+    getAuth: async () => ({ type: "oauth", source: "desktop" }),
+    tokenOf: async () => { throw Object.assign(new Error("桌面端未登录"), { signIn: "expired" }) },
+    profileOf: () => undefined,
+    call: async () => { called = true; return new Response("{}", { status: 200 }) },
+  })
+  const res = await f("https://up/v1/chat/completions", {
+    method: "POST", body: JSON.stringify({ model: "m", stream: true, messages: [] }),
+  })
+  expect(res.status).toBe(401)
+  expect(res.headers.get("X-Magpie-Sign-In")).toBe("expired")
+  expect((await res.json()).error.message).toContain("桌面端未登录")
+  expect(called).toBe(false)
+})
+
+test("a real 401 passes straight through", async () => {
+  const f = makeFetch({
+    getAuth: async () => ({ type: "api", key: "tok" }),
+    tokenOf: async (a) => a.key,
+    profileOf: () => undefined,
+    call: async () => new Response('{"code":40100,"message":"登录已过期，请重新登录"}', { status: 401 }),
+  })
+  const res = await f("https://up/v1/chat/completions", {
+    method: "POST", body: JSON.stringify({ model: "m", stream: true, messages: [] }),
+  })
+  expect(res.status).toBe(401)
+  expect(res.headers.get("X-Magpie-Sign-In")).toBe("expired")
+  expect((await res.json()).message).toContain("登录已过期")
+})

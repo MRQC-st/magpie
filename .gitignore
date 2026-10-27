@@ -1,0 +1,12 @@
+# 凭据暂存区：绝不入库（含 LobsterAI sqlite 副本、token）
+.secrets-staging/
+
+# 插件本地构建产物
+plugins/*/node_modules/
+plugins/*/dist/
+plugins/*/*.tgz
+
+# 系统与编辑器
+.DS_Store
+Thumbs.db
+*.log

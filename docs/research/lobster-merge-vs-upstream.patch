@@ -1,0 +1,1833 @@
+diff --git a/README.md b/README.md
+index 71036ed..81b728c 100644
+--- a/README.md
++++ b/README.md
+@@ -1,4 +1,4 @@
+-# opencode-lobster-auth
++# magpie-lobster-auth
+ 
+ Signs in to a [LobsterAI](https://lobsterai.youdao.com) (有道龙虾, NetEase
+ Youdao's desktop agent) account and serves its models as the provider
+@@ -7,6 +7,34 @@ Kimi, Qwen, MiniMax and Doubao.
+ 
+ **English** · [中文](README.zh-CN.md)
+ 
++## Where this comes from
++
++This is a **merged build** of two sources, and it keeps the credit for both:
++
++- **[Jasery/opencode-lobster-auth](https://github.com/Jasery/opencode-lobster-auth)**
++  — the original magpie provider plugin (MIT, © 2026 Jasery). The hook
++  structure, the SSE handling, the thinking-level translation, the Kimi K3
++  contract, the sign-in methods and the README you are reading started here.
++  `LICENSE` is theirs, unchanged.
++- **The reverse-engineering implementation** in
++  `D:/projects/model-reverse/handlers/lobsterai.mjs` — six capabilities
++  recovered from the desktop client's own source and confirmed against the
++  service: the dynamic client version, the `installation_uuid` attribution
++  fields, the double-JSON credential format, the server-side sign-in, the
++  `openclaw` model catalogue and the daily check-in.
++
++What the merge added on top of the original plugin:
++
++| Capability | What it does |
++| --- | --- |
++| Dynamic client version | The version header follows the installed desktop client (read from its `app.asar`), instead of a hard-coded string that goes stale. |
++| Refresh attribution | `/api/auth/refresh` now carries `uuid`, `userId` and `version`, as the client itself does. |
++| Server-side sign-in | A third method signs in from a credential copy on a server, with no browser and no typing. |
++| Automatic renewal | A refreshed token is written back to the server copy, so a long-running deployment keeps working. |
++| Model fallback chain | Cloud catalogue → the client's `openclaw` catalogue → a static list. |
++| Daily check-in | magpie's `auth.checkin` hook claims the daily credits. |
++| Runtime portability | `node:sqlite` instead of `bun:sqlite`, so the plugin loads under Node as well as Bun. |
++
+ ## Install
+ 
+ A folder plugin — it is not published to npm:
+@@ -18,28 +46,34 @@ magpie plugin login lobster
+ 
+ ## Signing in
+ 
+-Two ways, either one is enough. Both name the account by the Youdao account
+-id (`yid`), so signing in the second way to an account already signed in the
+-first way replaces it in place.
+-
+-- **Browser (a Youdao account).** The plugin serves a callback on
+-  `127.0.0.1` and magpie opens Youdao's sign-in page. The browser comes back
+-  with a code, which is traded for tokens at `/api/auth/exchange`. Kept as
+-  an `oauth` sign-in holding the access and refresh tokens and their expiry,
+-  so magpie renews it.
+-- **The desktop's sign-in.** Uses the account LobsterAI's own desktop app is
+-  signed in to. **No page is opened and nothing is typed.** The app's SQLite
+-  database is read, never written:
+-  - Windows: `%APPDATA%\LobsterAI\lobsterai.sqlite`
+-  - macOS: `~/Library/Application Support/LobsterAI/lobsterai.sqlite`
+-  - Linux: `~/.config/LobsterAI/lobsterai.sqlite`
+-
+-  A database that isn't there, or one the app keeps encrypted, fails this
+-  way with a message saying so; use the browser way instead.
+-
+-Both are kept in magpie's `plugin-auth.json`.
+-
+-### Why the import keeps no token
++Three ways, in this order. All name the account by the Youdao account id
++(`yid`), so signing in with another way to an account already signed in
++replaces it in place.
++
++0. **Browser (a Youdao account).** The plugin serves a callback on
++   `127.0.0.1` and magpie opens Youdao's sign-in page. The browser comes back
++   with a code, which is traded for tokens at `/api/auth/exchange`. Kept as
++   an `oauth` sign-in holding the access and refresh tokens and their expiry,
++   so magpie renews it.
++1. **The desktop's sign-in.** Uses the account LobsterAI's own desktop app is
++   signed in to. **No page is opened and nothing is typed.** The app's SQLite
++   database is read, never written:
++   - Windows: `%APPDATA%\LobsterAI\lobsterai.sqlite`
++   - macOS: `~/Library/Application Support/LobsterAI/lobsterai.sqlite`
++   - Linux: `~/.config/LobsterAI/lobsterai.sqlite`
++
++   A database that isn't there, or one the app keeps encrypted, fails this
++   way with a message saying so; use the browser way instead.
++2. **A server-side copy of the credentials.** For a deployment that has no
++   desktop client: point `LOBSTER_SERVER_COPY_DB` at a copy of that
++   database. The plugin reads its `refreshToken` and trades it for a fresh
++   token pair at `/api/auth/refresh` — still no browser, still no typing.
++   The result is a normal `oauth` sign-in, so magpie renews it from then on
++   and writes the renewed token back to the copy.
++
++All three are kept in magpie's `plugin-auth.json`.
++
++### Why the desktop import keeps no token
+ 
+ The desktop way stores **no credential at all** — `access` and `refresh` are
+ empty and `expires` is 0 — and reads the token from the app's database on
+@@ -58,15 +92,25 @@ The cost: if the app is signed out, uninstalled, or its database becomes
+ unreadable, the account stops working at once and magpie is told to ask for
+ a new sign-in. That is more honest than a token that quietly went stale.
+ 
+-### Renewal
++### Writing, and where it is allowed to write
+ 
+-A browser sign-in is renewed by magpie through the plugin's `auth.refresh`,
+-six hours before it ends. The desktop's sign-in is structurally never
+-renewed, as above.
++The plugin's write path and its read path are physically separate:
+ 
+-The plugin never calls LobsterAI's own refresh endpoint to check or renew
+-anything: `/api/auth/refresh` may spend the account's real refresh token, so
+-it is deliberately left alone.
++- The **desktop database is never written**. It may be running; a write could
++  corrupt the app's session. The read connection is opened `readOnly`.
++- A **server copy** is written only when it is a server copy — the desktop
++  data directory is refused by path, not merely by convention — and only for
++  the `auth_tokens` row. The write uses the client's own double-JSON
++  format and adapts to the table shape (the `updated_at` column is filled
++  when the table has it, omitted when it doesn't).
++
++### Renewal
++
++A browser sign-in and a server-copy sign-in are renewed by magpie through the
++plugin's `auth.refresh`, six hours before they end. The refresh request
++carries the attribution fields the client sends — `firstKeyfrom`,
++`latestKeyfrom`, `uuid` (the installation id), `userId` and `version`.
++The desktop's sign-in is structurally never renewed, as above.
+ 
+ ## Requests
+ 
+@@ -87,7 +131,7 @@ habits are handled:
+ - **Requests carry the desktop client's headers**
+   (`X-LobsterAI-Client-Version`, `X-LobsterAI-Client-Capabilities`).
+   LobsterAI doesn't insist on them, but they name the feature set the plugin
+-  speaks.
++  speaks. The version is read from the installed client, so it stays right.
+ 
+ ### Thinking levels
+ 
+@@ -129,8 +173,10 @@ handling above is live, not a precaution.
+ 
+ Signed in, the list is the account's own (`/api/models/available`): 29
+ models, each with its context window, whether it takes images, and its
+-thinking levels. Until then a static list of five is used, so the provider
+-is visible before signing in.
++thinking levels. When the cloud list is unavailable, the plugin falls back
++to the catalogue the desktop client keeps locally
++(`%APPDATA%/LobsterAI/openclaw/state/openclaw.json`), and then to a static
++list of eight, so the provider is always visible and never empty.
+ 
+ `costMultiplier` becomes magpie's `rate`. It is **time-of-day pricing**:
+ `deepseek-flash` is 0.05 in LobsterAI's off-peak hours and 0.1 in the peak
+@@ -144,26 +190,47 @@ from `/api/user/quota` and `/api/user/profile-summary`. The plugin reports
+ `kept`: it renews nothing itself, so it must not claim a renewal it didn't
+ do.
+ 
++## Daily check-in
++
++The plugin implements magpie's `auth.checkin` hook and claims LobsterAI's
++daily credits through the `client-activities` flow the desktop client uses.
++It reports `claimed` only when the service actually granted credits — a 200
++with nothing granted means it was already claimed today, not a success.
++
++## Configuration
++
++Everything that reaches the network can be pointed elsewhere, which is what
++makes the plugin testable offline:
++
++| Variable | Meaning | Default |
++| --- | --- | --- |
++| `LOBSTER_API_BASE` | The API root every request goes to | `https://lobsterai-server.youdao.com/api` |
++| `LOBSTER_SERVER_COPY_DB` | The server-side credential copy | unset — no server sign-in without it |
++| `LOBSTER_OPENCLAW_PATH` | The client's local model catalogue | `%APPDATA%/LobsterAI/openclaw/state/openclaw.json` |
++| `LOBSTER_ASAR_PATH` | The client's `app.asar`, for the version | auto-detected |
++| `LOBSTER_CLIENT_VERSION` | Pins the client version | read from the client |
++| `LOBSTER_LOGIN_URL` | The sign-in page | the portal's |
++
++The same values can be given in magpie's `plugins.json` under `options`.
++
+ ## Not here
+ 
+ - **Company accounts.** LobsterAI sends them through a different page
+   (`EnterpriseIdentitySelect`). Only personal accounts are handled.
+-- **A verified `/api/auth/refresh`.** Calling it may spend the account's
+-  real refresh token, so it is not exercised. The renewal path is written
+-  from the app's own code and has not been confirmed against the service.
+ - **An exact output limit.** The catalogue has no such field. The plugin
+   declares a conservative 32,000; measured, LobsterAI takes 262,144 and
+   answers 500 at 524,288, so the real ceiling is somewhere between.
+ - **OpenCode.** The plugin is written in OpenCode's provider-plugin format —
+   that is the format magpie loads — but it has only been exercised in magpie.
+-  `auth.refresh`, `auth.refreshLead` and the `magpie` field in `package.json`
+-  are magpie's own, which OpenCode ignores.
++  `auth.refresh`, `auth.refreshLead`, `auth.checkin` and the `magpie`
++  field in `package.json` are magpie's own, which OpenCode ignores.
+ - **Several accounts at once.** magpie keeps one sign-in per provider.
+ 
+ ## Development
+ 
+ ```sh
+-bun test
++bun test                # the reference runtime
++node --test --test-force-exit "test/**/*.test.mjs"
+ ```
+ 
+ The entry point only assembles the hooks. The logic lives in `lib/` as plain
+@@ -172,4 +239,5 @@ both treat every exported function as a plugin of its own.
+ 
+ ## License
+ 
+-MIT
++MIT — see [LICENSE](LICENSE). © 2026 Jasery and the contributors of this
++merged build.
+diff --git a/README.zh-CN.md b/README.zh-CN.md
+index c0b3cdf..80aa899 100644
+--- a/README.zh-CN.md
++++ b/README.zh-CN.md
+@@ -1,4 +1,4 @@
+-# opencode-lobster-auth
++# magpie-lobster-auth
+ 
+ 为 [magpie](https://usemagpie.ai) 提供 provider `lobster`：登录
+ [LobsterAI](https://lobsterai.youdao.com)（有道龙虾，网易有道的桌面 agent）
+@@ -7,6 +7,31 @@ MiniMax、豆包。
+ 
+ [English](README.md) · **中文**
+ 
++## 合并来源
++
++这是**两个来源的合并版**，两边的署名都保留：
++
++- **[Jasery/opencode-lobster-auth](https://github.com/Jasery/opencode-lobster-auth)**
++  —— 原始的 magpie provider 插件（MIT，© 2026 Jasery）。钩子结构、SSE 处理、
++  思考档位翻译、Kimi K3 契约、登录方式，以及你正在读的这篇 README 都源于此。
++  `LICENSE` 原样保留，未作改动。
++- **`D:/projects/model-reverse/handlers/lobsterai.mjs` 里的逆向实现** —— 从桌面端
++  自己的源码复原、并在服务端实测确认的六项能力：动态客户端版本号、
++  `installation_uuid` 归因字段、双层 JSON 凭据格式、服务器端零交互登录、
++  `openclaw` 模型目录、每日签到。
++
++合并相对原插件新增的能力：
++
++| 能力 | 作用 |
++| --- | --- |
++| 动态客户端版本号 | 标识头里的版本跟着已安装的桌面端走（从它的 `app.asar` 里读），而不是写死一个会腐化的字符串。 |
++| 续期归因字段 | `/api/auth/refresh` 现在会带上 `uuid`、`userId`、`version`，与客户端自己发的一致。 |
++| 服务器端零交互登录 | 第三种登录方式：从服务器上的凭据副本登录，不开浏览器、不用打字。 |
++| 自动续签回写 | 续期得到的新 token 会写回服务器副本，长跑的部署因此不会悄悄过期。 |
++| 模型三级降级 | 云端目录 → 客户端的 `openclaw` 目录 → 静态兜底表。 |
++| 每日签到 | magpie 的 `auth.checkin` 钩子负责领每日积分。 |
++| 双运行时可加载 | 用 `node:sqlite` 代替 `bun:sqlite`，Node 与 Bun 两端都能加载。 |
++
+ ## 安装
+ 
+ 这是一个文件夹插件，没有发布到 npm：
+@@ -18,24 +43,29 @@ magpie plugin login lobster
+ 
+ ## 登录
+ 
+-两种方式，任选其一。两者都用有道账号标识（`yid`）给账号命名，所以对一个
+-已经用第一种方式登录过的账号再用第二种登录，是原地替换。
++三种方式，顺序如下。三者都用有道账号标识（`yid`）给账号命名，所以对一个
++已经登录过的账号换一种方式登录，是原地替换。
+ 
+-- **浏览器登录（有道账号）。** 插件在本机 `127.0.0.1` 起一个回调服务，
+-  magpie 打开有道登录页。浏览器带着授权码跳回来，插件拿它在
+-  `/api/auth/exchange` 换取 token。存成一个 `oauth` 账号，带 access 与
+-  refresh token 及到期时间，因此 magpie 会为它续期。
+-- **从桌面端导入。** 使用 LobsterAI 桌面端当前登录的账号。**不打开任何页面，
+-  不需要输入任何东西。** 只读桌面端的 SQLite 库，绝不写入：
+-  - Windows：`%APPDATA%\LobsterAI\lobsterai.sqlite`
+-  - macOS：`~/Library/Application Support/LobsterAI/lobsterai.sqlite`
+-  - Linux：`~/.config/LobsterAI/lobsterai.sqlite`
++0. **浏览器登录（有道账号）。** 插件在本机 `127.0.0.1` 起一个回调服务，
++   magpie 打开有道登录页。浏览器带着授权码跳回来，插件拿它在
++   `/api/auth/exchange` 换取 token。存成一个 `oauth` 账号，带 access 与
++   refresh token 及到期时间，因此 magpie 会为它续期。
++1. **从桌面端导入。** 使用 LobsterAI 桌面端当前登录的账号。**不打开任何页面，
++   不需要输入任何东西。** 只读桌面端的 SQLite 库，绝不写入：
++   - Windows：`%APPDATA%\LobsterAI\lobsterai.sqlite`
++   - macOS：`~/Library/Application Support/LobsterAI/lobsterai.sqlite`
++   - Linux：`~/.config/LobsterAI/lobsterai.sqlite`
+ 
+-  库不存在，或者被桌面端加密存放，这条路会带着说明失败，改用浏览器登录即可。
++   库不存在，或者被桌面端加密存放，这条路会带着说明失败，改用浏览器登录即可。
++2. **从服务器凭据副本导入。** 给没有桌面端的部署用：把 `LOBSTER_SERVER_COPY_DB`
++   指向那份库的一个副本。插件读出副本里的 `refreshToken`，去
++   `/api/auth/refresh` 换一对新 token —— 同样不开浏览器、不用打字。
++   结果是一个正常的 `oauth` 账号，因此 magpie 会为它续期，并把续期得到的新
++   token 写回副本。
+ 
+-两种方式都保存在 magpie 的 `plugin-auth.json`。
++三种方式都保存在 magpie 的 `plugin-auth.json`。
+ 
+-### 为什么导入这条路不保存 token
++### 为什么从桌面端导入不保存 token
+ 
+ 导入方式**一个字节的凭据都不存**（`access` 和 `refresh` 都是空串，`expires`
+ 为 0），只在每次请求时现读桌面端的库：
+@@ -49,13 +79,22 @@ magpie plugin login lobster
+ 代价是：桌面端退出登录、卸载，或者库变得不可读，这个账号会**立刻**失效，
+ 并被标记为需要重新登录。这比用一个已经悄悄失效的旧 token 更诚实。
+ 
+-### 续期
++### 写入，以及允许写在哪里
+ 
+-浏览器登录的账号由 magpie 通过插件的 `auth.refresh` 在到期前 6 小时续期。
+-导入的账号如上一节所述，结构性不会被续期。
++插件的写路径与读路径是物理分开的：
+ 
+-插件从不调用 LobsterAI 自己的续期接口去验证或刷新任何东西：
+-`/api/auth/refresh` 可能消耗账号真实的 refresh token，因此刻意不碰它。
++- **桌面端的库绝不写入。** 它可能正在运行，写进去可能破坏桌面端的会话。
++  读连接以 `readOnly` 打开。
++- **服务器副本**只在它确实是服务器副本时才写 —— 桌面端数据目录是按**路径**
++  拒绝的，不是靠约定 —— 而且只写 `auth_tokens` 这一行。写入用客户端自己的
++  双层 JSON 格式，并按表结构自适应（表里有 `updated_at` 列就填，没有就省掉）。
++
++### 续期
++
++浏览器登录与服务器副本登录都由 magpie 通过插件的 `auth.refresh` 在到期前 6
++小时续期。续期请求带上客户端自己会带的归因字段 —— `firstKeyfrom`、
++`latestKeyfrom`、`uuid`（安装 id）、`userId`、`version`。
++桌面端导入的账号如上所述，结构性不会被续期。
+ 
+ ## 请求
+ 
+@@ -71,7 +110,7 @@ completions。LobsterAI 有三个习惯被处理掉了：
+   账号因此会被标出来。
+ - **请求带上桌面端的标识头**（`X-LobsterAI-Client-Version`、
+   `X-LobsterAI-Client-Capabilities`）。LobsterAI 不强制要求，但它们标明了
+-  插件所说的特性集。
++  插件所说的特性集。版本号从已安装的客户端读，因此不会过期。
+ 
+ ### 思考档位
+ 
+@@ -108,8 +147,9 @@ LobsterAI 的 `kimi-k3` 采样参数由服务端固定，因此 `temperature`、
+ ## 模型
+ 
+ 登录后，列表来自账号自己（`/api/models/available`）：29 个模型，各带上下文
+-窗口、是否收图片、以及它的思考档位。登录之前用一份 5 个模型的静态列表兜底，
+-这样 provider 在登录前就可见。
++窗口、是否收图片、以及它的思考档位。云端目录拿不到时，退到桌面端本地维护的
++目录（`%APPDATA%/LobsterAI/openclaw/state/openclaw.json`），再退到 8 个模型的
++静态表 —— provider 始终可见，不会是空的。
+ 
+ `costMultiplier` 成为 magpie 的 `rate`。它是**分时计价**：`deepseek-flash`
+ 在 LobsterAI 的空闲时段是 0.05，高峰时段是 0.1（高峰为北京时间
+@@ -122,25 +162,44 @@ LobsterAI 的 `kimi-k3` 采样参数由服务端固定，因此 `temperature`、
+ `/api/user/quota` 与 `/api/user/profile-summary`。插件上报的是 `kept`：它自己
+ 不续期，因此不该声称做过一次它没做的续期。
+ 
++## 每日签到
++
++插件实现了 magpie 的 `auth.checkin` 钩子，用桌面端自己的 `client-activities`
++流程去领 LobsterAI 的每日积分。只有在服务端**确实发分**时才报 `claimed` ——
++200 但没发分说明今天已经领过了，不是成功。
++
++## 配置
++
++所有出站地址都可改指向，这也是插件能离线测试的前提：
++
++| 变量 | 含义 | 默认值 |
++| --- | --- | --- |
++| `LOBSTER_API_BASE` | 所有请求的 API 根 | `https://lobsterai-server.youdao.com/api` |
++| `LOBSTER_SERVER_COPY_DB` | 服务器上的凭据副本 | 未设置 —— 不配就没有服务器登录 |
++| `LOBSTER_OPENCLAW_PATH` | 客户端本地的模型目录 | `%APPDATA%/LobsterAI/openclaw/state/openclaw.json` |
++| `LOBSTER_ASAR_PATH` | 客户端的 `app.asar`（用于取版本） | 自动探测 |
++| `LOBSTER_CLIENT_VERSION` | 固定客户端版本 | 从客户端读取 |
++| `LOBSTER_LOGIN_URL` | 登录页 | 门户默认 |
++
++同样的值也可以写在 magpie 的 `plugins.json` 的 `options` 字段里。
++
+ ## 不做的事
+ 
+ - **企业账号。** LobsterAI 让它们走另一个页面（`EnterpriseIdentitySelect`）。
+   目前只处理个人账号。
+-- **经过验证的 `/api/auth/refresh`。** 调用它可能消耗账号真实的 refresh
+-  token，因此没有实测。续期这条路是照着桌面端自己的代码写的，没有与服务端
+-  核对过。
+ - **精确的输出上限。** 目录里没有这个字段。插件声明了保守的 32,000；实测
+   LobsterAI 接受 262,144，在 524,288 时返回 500，所以真实上限在两者之间。
+ - **OpenCode。** 这个插件是按 OpenCode 的 provider 插件格式写的 —— magpie
+   加载的正是这个格式 —— 但只在 magpie 上实测过。`auth.refresh`、
+-  `auth.refreshLead` 以及 `package.json` 里的 `magpie` 字段是 magpie 自己的，
+-  OpenCode 会忽略它们。
++  `auth.refreshLead`、`auth.checkin` 以及 `package.json` 里的 `magpie` 字段是
++  magpie 自己的，OpenCode 会忽略它们。
+ - **同时使用多个账号。** magpie 每个 provider 只保留一份登录。
+ 
+ ## 开发
+ 
+ ```sh
+-bun test
++bun test                # 参考运行时
++node --test --test-force-exit "test/**/*.test.mjs"
+ ```
+ 
+ 入口只负责装配钩子。逻辑都在 `lib/` 下，是普通函数，通过 `_internal` 暴露
+@@ -148,4 +207,4 @@ bun test
+ 
+ ## 许可
+ 
+-MIT
++MIT —— 见 [LICENSE](LICENSE)。© 2026 Jasery 与本合并版的贡献者。
+diff --git a/docs/superpowers/plans/2026-10-09-lobster-provider-plugin.md b/docs/superpowers/plans/2026-10-09-lobster-provider-plugin.md
+index acfb554..7ebbe5e 100644
+--- a/docs/superpowers/plans/2026-10-09-lobster-provider-plugin.md
++++ b/docs/superpowers/plans/2026-10-09-lobster-provider-plugin.md
+@@ -146,6 +146,9 @@ export const LOGIN_URL = "https://lobsterai.youdao.com/portal#/login"
+ export const ICON = "https://lobsterai.youdao.com/portal/lobsterai-logo.png"
+ 
+ // 桌面端 2026.9.23 发的标识头；上游不强制，但可能影响特性开关
++// ⚠️ 历史文档（2026-10-09 方案稿）。这行写死的版本号**已经被合并版移除**：
++//    真版本是 2026.10.16，写死必然腐化。现在走 lib/version.mjs 的
++//    clientVersion()，从客户端 asar 的 package.json 里读。
+ export const CLIENT_VERSION = "2026.9.23"
+ export const CAPABILITIES = "kimi-k3-agentic-v1,thinking-level-control-v1"
+ 
+diff --git a/index.mjs b/index.mjs
+index 9042b04..905d126 100644
+--- a/index.mjs
++++ b/index.mjs
+@@ -1,18 +1,90 @@
+-import { PROVIDER, NAME, API, CHAT_BASE, NPM, FALLBACK_MODELS } from "./lib/constants.mjs"
++// magpie provider 插件：LobsterAI（有道龙虾）。
++//
++// 入口只装配钩子；逻辑都在 lib/ 下，通过 _internal 暴露给测试。
++// ⚠️ 入口**禁止**导出别的函数：magpie 把每个导出的函数都当成一个独立插件加载。
++//
++// 登录方式固定三条，顺序固定（下标是契约）：
++//   0 浏览器登录（有道账号）
++//   1 从本机桌面端导入（只读，不存 token）
++//   2 从服务器副本导入（换 token，可续期）
++//
++// 出站地址全部可注入：env LOBSTER_API_BASE（API 根），
++// 离线测试把它指向 mock 即可；其余 env 见 lib/constants.mjs。
++
++import {
++  PROVIDER,
++  NAME,
++  NPM,
++  FALLBACK_MODELS,
++  apiUrl,
++  chatBaseUrl,
++  clientVersion,
++} from "./lib/constants.mjs"
+ import { makeFetch } from "./lib/proxy.mjs"
+-import { modelsFromCatalog, profileOfFrom } from "./lib/models.mjs"
++import { modelsFromCatalog, profileOfFrom, modelsFromManaged, modelsFromConfig } from "./lib/models.mjs"
+ import { usageFrom } from "./lib/usage.mjs"
+-import { desktopSignIn, desktopToken } from "./lib/auth-import.mjs"
++import {
++  desktopSignIn,
++  desktopToken,
++  serverCopyPath,
++  readCredentials,
++  readKvFromPath,
++  isDesktopPath,
++  desktopPathCandidates,
++  localAttribution,
++  dbPath,
++} from "./lib/auth-import.mjs"
+ import { beginSignIn } from "./lib/auth-login.mjs"
++import { runCheckin } from "./lib/checkin.mjs"
++import { readManagedModels, openclawPath } from "./lib/managed-models.mjs"
+ import { jwtExp } from "./lib/jwt.mjs"
++import { makeLogger } from "./lib/version.mjs"
++import {
++  refreshBody,
++  writeBackToCopy,
++  serverCopySignIn,
++  fallbackModels,
++  markFellBack,
++  FELL_BACK,
++  attributionFor,
++  attributionFromPath,
++} from "./lib/session.mjs"
+ 
+ const REFRESH_LEAD = 6 * 3600 * 1000
+ 
+ // 每个账号的模型 → 思考档位，供请求管线查表
+ const profiles = new Map()
+ 
+-async function apiGet(path, token, timeout = 20_000) {
+-  const res = await fetch(API + path, {
++// plugins.json 的 options 字段 → 运行期 env 覆盖。
++//
++// ⚠️ process.env 要**现读**，不能在建插件时快照一份：调用方（测试、运维脚本）
++//    可能在插件装配之后才改环境变量。快照会让改动看不见。
++//    ⇒ 用 Proxy：覆盖项优先，其余回落到实时的 process.env。
++function envOf(options) {
++  const o = options ?? {}
++  const over = {}
++  if (o.env && typeof o.env === "object") {
++    for (const [k, v] of Object.entries(o.env)) {
++      if (typeof v === "string") over[k] = v
++    }
++  }
++  if (typeof o.apiBase === "string" && o.apiBase.trim()) over.LOBSTER_API_BASE = o.apiBase.trim()
++  if (typeof o.serverCopyDb === "string" && o.serverCopyDb.trim()) over.LOBSTER_SERVER_COPY_DB = o.serverCopyDb.trim()
++  if (typeof o.openclawPath === "string" && o.openclawPath.trim()) over.LOBSTER_OPENCLAW_PATH = o.openclawPath.trim()
++  if (typeof o.loginUrl === "string" && o.loginUrl.trim()) over.LOBSTER_LOGIN_URL = o.loginUrl.trim()
++  return new Proxy(over, {
++    get(target, prop) {
++      if (prop in target) return target[prop]
++      return process.env[prop]
++    },
++    has(target, prop) {
++      return prop in target || prop in process.env
++    },
++  })
++}
++
++async function apiGet(path, token, { env = process.env, timeout = 20_000, fetchImpl = fetch } = {}) {
++  const res = await fetchImpl(apiUrl(env) + path, {
+     headers: { authorization: `Bearer ${token}` },
+     signal: AbortSignal.timeout(timeout),
+   })
+@@ -29,163 +101,267 @@ async function apiGet(path, token, timeout = 20_000) {
+ // 取这次请求要用的 token。
+ // 桌面端导入的账号自己不存 token（见 lib/auth-import.mjs），每次现读 ——
+ // 桌面端续期后插件自动跟上。读不到就抛 signIn:"expired"。
+-async function tokenOf(auth) {
++async function tokenOf(auth, env = process.env) {
+   if (!auth) return ""
+-  if (auth.source === "desktop") return desktopToken()
++  if (auth.source === "desktop") return desktopToken(env)
+   return auth.type === "oauth" ? (auth.access ?? "") : (auth.key ?? "")
+ }
+ 
+-export const LobsterAuthPlugin = async () => ({
+-  config: async (cfg) => {
+-    cfg.provider ??= {}
+-    cfg.provider[PROVIDER] ??= {
+-      name: NAME,
+-      npm: NPM,
+-      api: API,
+-      models: FALLBACK_MODELS,
+-    }
+-  },
+-
+-  auth: {
+-    provider: PROVIDER,
+-    refreshLead: REFRESH_LEAD,
+-
+-    methods: [
+-      {
+-        type: "oauth",
+-        label: "浏览器登录（有道账号）",
+-        async authorize() {
+-          // 由 magpie 打开这个 url；插件不再自己开一次，否则会开两个标签页
+-          const pending = await beginSignIn()
+-          return {
+-            url: pending.url,
+-            instructions: "在浏览器里用有道账号登录，完成后回到这里。",
+-            method: "auto",
+-            callback: () => pending.finish(),
+-          }
++export const LobsterAuthPlugin = async (input, options) => {
++  const env = envOf(options)
++  const log = makeLogger(input)
++  const fetchImpl = typeof options?.fetch === "function" ? options.fetch : fetch
++
++  return {
++    config: async (cfg) => {
++      cfg.provider ??= {}
++      cfg.provider[PROVIDER] ??= {
++        name: NAME,
++        npm: NPM,
++        api: chatBaseUrl(env),
++        models: FALLBACK_MODELS,
++      }
++    },
++
++    auth: {
++      provider: PROVIDER,
++      refreshLead: REFRESH_LEAD,
++
++      methods: [
++        {
++          type: "oauth",
++          label: "浏览器登录（有道账号）",
++          async authorize() {
++            // 由 magpie 打开这个 url；插件不再自己开一次，否则会开两个标签页
++            const pending = await beginSignIn({ env })
++            return {
++              url: pending.url,
++              instructions: "在浏览器里用有道账号登录，完成后回到这里。",
++              method: "auto",
++              callback: () => pending.finish(),
++            }
++          },
+         },
++        {
++          // 必须是 oauth：api 类型会让 magpie 强制从 stdin 读一个 key，
++          // 而这条路根本不需要用户输入任何东西（见设计文档 §4.3）。
++          type: "oauth",
++          label: "从本机 LobsterAI 导入登录",
++          async authorize() {
++            // url 留空：magpie 不打开任何页面，直接走 callback
++            return {
++              url: "",
++              instructions: "直接使用本机 LobsterAI 桌面端已登录的账号。",
++              method: "auto",
++              async callback() {
++                try {
++                  return desktopSignIn(env)
++                } catch (e) {
++                  return { type: "failed", error: e.message }
++                }
++              },
++            }
++          },
++        },
++        {
++          // 下标 2：服务器副本导入 —— 读副本里的 refreshToken 换一对新 token。
++          // 这条路**能续期**（有 refresh + expires），因此会落盘成 oauth 账号。
++          type: "oauth",
++          label: "从服务器副本导入（换 token）",
++          async authorize() {
++            return {
++              url: "",
++              instructions: "从服务器上的 LobsterAI 凭据副本换取 token（零交互）。",
++              method: "auto",
++              async callback() {
++                try {
++                  return await serverCopySignIn({ env, fetchImpl })
++                } catch (e) {
++                  return { type: "failed", error: e.message }
++                }
++              },
++            }
++          },
++        },
++      ],
++
++      // 只对带 refresh 的 oauth 账号生效。
++      // 桌面端导入的账号 refresh 是空串、expires 为 0，magpie 不会调用这里，
++      // 桌面端的会话因此不会被搅动（auth.source === 'desktop' 的早退保留）。
++      async refresh(auth) {
++        if (auth?.type !== "oauth" || auth.source === "desktop" || !auth.refresh) return {}
++        // body 带归因字段：uuid（installation_uuid）/ userId（auth_user.id）/ version
++        const body = refreshBody({ refreshToken: auth.refresh, auth, env })
++        const res = await fetchImpl(apiUrl(env) + "/auth/refresh", {
++          method: "POST",
++          headers: { "content-type": "application/json" },
++          body: JSON.stringify(body),
++          signal: AbortSignal.timeout(30_000),
++        })
++        const text = await res.text()
++        let v
++        try { v = JSON.parse(text) } catch { throw new Error("LobsterAI 续期：响应无法解析") }
++        if (v?.code !== 0 || !v?.data?.accessToken) {
++          throw Object.assign(new Error(`LobsterAI 续期失败：${v?.message || `code ${v?.code}`}`), { signIn: "expired" })
++        }
++        const d = v.data
++        const access = String(d.accessToken)
++        const refresh = String(d.refreshToken ?? auth.refresh)
++        // 回写服务器副本（**本机桌面端库绝不写**）；失败不影响主流程
++        writeBackToCopy({
++          path: auth.copyPath ?? serverCopyPath(env),
++          next: { accessToken: access, refreshToken: refresh },
++          prev: { refreshToken: auth.refresh },
++          env,
++          log,
++        })
++        return {
++          access,
++          refresh,
++          // 上游可能不给新 token 的 exp；读不到就沿用旧的到期时间
++          expires: jwtExp(access) || auth.expires || 0,
++        }
+       },
+-      {
+-        // 必须是 oauth：api 类型会让 magpie 强制从 stdin 读一个 key，
+-        // 而这条路根本不需要用户输入任何东西（见设计文档 §4.3）。
+-        type: "oauth",
+-        label: "从本机 LobsterAI 导入登录",
+-        async authorize() {
+-          // url 留空：magpie 不打开任何页面，直接走 callback
++
++      async loader(getAuth) {
++        const auth = await getAuth()
++        // 这里只是给 magpie 一个「看起来已登录」的信号；真正的 token
++        // 由下面的 fetch 每次请求现取（桌面端账号尤其需要）。
++        let token = ""
++        try { token = await tokenOf(auth, env) } catch { return {} }
++        if (!token) return {}
++        return {
++          baseURL: chatBaseUrl(env),
++          apiKey: token,
++          headers: {},
++          fetch: makeFetch({
++            getAuth,
++            tokenOf: (a) => tokenOf(a, env),
++            profileOf: (id) => profiles.get(String(id)),
++            call: (input, init) => fetchImpl(input, init),
++            version: clientVersion(env, log),
++            env,
++          }),
++        }
++      },
++
++      async usage(getAuth) {
++        const auth = await getAuth()
++        let token = ""
++        try { token = await tokenOf(auth, env) } catch (e) {
++          return { error: e.message, windows: [], signIn: e.signIn === "expired" ? "expired" : "kept" }
++        }
++        if (!token) return { error: "尚未登录", windows: [] }
++        try {
++          const [quota, profile] = await Promise.all([
++            apiGet("/user/quota", token, { env, fetchImpl }),
++            apiGet("/user/profile-summary", token, { env, fetchImpl }),
++          ])
++          // 插件自己不续期（交给 magpie 的 auth.refresh），所以这次请求用的
++          // 就是存下来的 token —— 如实报 kept。社区插件报 renewed 是因为它们
++          // 自己维护续期表，这里没有那张表，不该照抄。
++          return usageFrom(quota, profile, "kept")
++        } catch (e) {
+           return {
+-            url: "",
+-            instructions: "直接使用本机 LobsterAI 桌面端已登录的账号。",
+-            method: "auto",
+-            async callback() {
+-              try {
+-                return desktopSignIn()
+-              } catch (e) {
+-                return { type: "failed", error: e.message }
+-              }
+-            },
++            error: e.message,
++            windows: [],
++            signIn: e.signIn === "expired" ? "expired" : "kept",
+           }
+-        },
++        }
+       },
+-    ],
+-
+-    // 只对路径 A（浏览器登录，有 refresh 和 expires）生效。
+-    // 路径 B（桌面端导入）的 refresh 是空串、expires 为 0，
+-    // magpie 不会调用这里，桌面端的会话因此不会被搅动。
+-    async refresh(auth) {
+-      if (auth?.type !== "oauth" || auth.source === "desktop" || !auth.refresh) return {}
+-      const res = await fetch(`${API}/auth/refresh`, {
+-        method: "POST",
+-        headers: { "content-type": "application/json" },
+-        body: JSON.stringify({ refreshToken: auth.refresh }),
+-        signal: AbortSignal.timeout(30_000),
+-      })
+-      const text = await res.text()
+-      let v
+-      try { v = JSON.parse(text) } catch { throw new Error("LobsterAI 续期：响应无法解析") }
+-      if (v?.code !== 0 || !v?.data?.accessToken) {
+-        throw Object.assign(new Error(`LobsterAI 续期失败：${v?.message || `code ${v?.code}`}`), { signIn: "expired" })
+-      }
+-      const d = v.data
+-      return {
+-        access: String(d.accessToken),
+-        refresh: String(d.refreshToken ?? auth.refresh),
+-        // 上游可能不给新 token 的 exp；读不到就沿用旧的到期时间
+-        expires: jwtExp(d.accessToken) || auth.expires || 0,
+-      }
+-    },
+ 
+-    async loader(getAuth) {
+-      const auth = await getAuth()
+-      // 这里只是给 magpie 一个「看起来已登录」的信号；真正的 token
+-      // 由下面的 fetch 每次请求现取（桌面端账号尤其需要）。
+-      let token = ""
+-      try { token = await tokenOf(auth) } catch { return {} }
+-      if (!token) return {}
+-      return {
+-        baseURL: CHAT_BASE,
+-        apiKey: token,
+-        headers: {},
+-        fetch: makeFetch({
+-          getAuth,
+-          tokenOf,
+-          profileOf: (id) => profiles.get(String(id)),
+-          call: (input, init) => fetch(input, init),
+-        }),
+-      }
++      // 每日签到。token 来源分叉：
++      //   source === 'desktop' → 现读桌面端库（桌面端自己续期后的新 token）
++      //   oauth                → auth.access（magpie 续期后的新 token）
++      async checkin(getAuth) {
++        const auth = await getAuth()
++        let token = ""
++        try {
++          token = await tokenOf(auth, env)
++        } catch (e) {
++          throw new Error(e?.message ?? "LobsterAI 登录信息不可用")
++        }
++        if (!token) throw new Error("尚未登录，无法签到")
++        // 签到请求用**动态**的客户端版本号
++        return await runCheckin({
++          token,
++          version: clientVersion(env, log),
++          env,
++          fetchImpl,
++        })
++      },
+     },
+ 
+-    async usage(getAuth) {
+-      const auth = await getAuth()
+-      let token = ""
+-      try { token = await tokenOf(auth) } catch (e) {
+-        return { error: e.message, windows: [], signIn: e.signIn === "expired" ? "expired" : "kept" }
+-      }
+-      if (!token) return { error: "尚未登录", windows: [] }
+-      try {
+-        const [quota, profile] = await Promise.all([
+-          apiGet("/user/quota", token),
+-          apiGet("/user/profile-summary", token),
+-        ])
+-        // 插件自己不续期（交给 magpie 的 auth.refresh），所以这次请求用的
+-        // 就是存下来的 token —— 如实报 kept。社区插件报 renewed 是因为它们
+-        // 自己维护续期表，这里没有那张表，不该照抄。
+-        return usageFrom(quota, profile, "kept")
+-      } catch (e) {
+-        return {
+-          error: e.message,
+-          windows: [],
+-          signIn: e.signIn === "expired" ? "expired" : "kept",
++    provider: {
++      id: PROVIDER,
++      async models(provider, { auth } = {}) {
++        let token = ""
++        try { token = await tokenOf(auth, env) } catch (e) {
++          if (e.signIn === "expired") throw e
++          return provider.models
+         }
+-      }
+-    },
+-  },
+-
+-  provider: {
+-    id: PROVIDER,
+-    async models(provider, { auth } = {}) {
+-      let token = ""
+-      try { token = await tokenOf(auth) } catch (e) {
+-        if (e.signIn === "expired") throw e
+-        return provider.models
+-      }
+-      if (!token) return provider.models
+-      try {
+-        const list = await apiGet(
+-          "/models/available?firstKeyfrom=official&latestKeyfrom=official",
+-          token,
+-        )
+-        if (!Array.isArray(list) || list.length === 0) return provider.models
+-        for (const [id, p] of Object.entries(profileOfFrom(list))) profiles.set(id, p)
+-        const out = modelsFromCatalog(list, { ...provider, id: PROVIDER })
+-        return Object.keys(out).length > 0 ? out : provider.models
+-      } catch (e) {
+-        // 登录失效要标记账号；其余情况保留原列表
+-        if (e.signIn === "expired") throw e
+-        return provider.models
+-      }
++        if (!token) return provider.models
++        try {
++          const list = await apiGet(
++            "/models/available?firstKeyfrom=official&latestKeyfrom=official",
++            token,
++            { env, fetchImpl },
++          )
++          // 云端没给可用目录 → 降级（openclaw → 静态表）
++          if (!Array.isArray(list) || list.length === 0) return fallbackModels(provider, env)
++          for (const [id, p] of Object.entries(profileOfFrom(list))) profiles.set(id, p)
++          const out = modelsFromCatalog(list, { ...provider, id: PROVIDER })
++          return Object.keys(out).length > 0 ? out : fallbackModels(provider, env)
++        } catch (e) {
++          // 登录失效要标记账号；其余情况走降级（openclaw → 静态表）
++          if (e.signIn === "expired") throw e
++          return fallbackModels(provider, env)
++        }
++      },
+     },
+-  },
+-})
++  }
++}
+ 
+-// 唯一允许的函数导出：magpie 会把每个导出的函数都当成一个插件加载
+-export const _internal = { PROVIDER, FALLBACK_MODELS, usageFrom, modelsFromCatalog }
++// 唯一允许的函数导出：magpie 会把每个导出的函数都当成一个插件加载。
++// 新模块的可测部分全部挂在这里。
++export const _internal = {
++  // 身份与常量
++  PROVIDER,
++  FALLBACK_MODELS,
++  usageFrom,
++  // 模型
++  modelsFromCatalog,
++  modelsFromManaged,
++  modelsFromConfig,
++  profileOfFrom,
++  fallbackModels,
++  markFellBack,
++  FELL_BACK,
++  readManagedModels,
++  openclawPath,
++  // 签到
++  runCheckin,
++  // 出站与版本
++  clientVersion,
++  apiUrl,
++  chatBaseUrl,
++  makeFetch,
++  envOf,
++  // 凭据读取（只读）
++  desktopSignIn,
++  desktopToken,
++  desktopTokenOnly: desktopToken,
++  readCredentials,
++  readKvFromPath,
++  dbPath,
++  serverCopyPath,
++  isDesktopPath,
++  desktopPathCandidates,
++  localAttribution,
++  // 会话与续期
++  serverCopySignIn,
++  refreshBody,
++  writeBackToCopy,
++  attributionFor,
++  attributionFromPath,
++}
+diff --git a/lib/auth-import.mjs b/lib/auth-import.mjs
+index 4d1195b..94f4843 100644
+--- a/lib/auth-import.mjs
++++ b/lib/auth-import.mjs
+@@ -1,60 +1,198 @@
+-// 从本机 LobsterAI 桌面端的 sqlite 里读出登录信息。
++// 从 LobsterAI 桌面端（或服务器上的副本）的 sqlite 里读出登录信息。
+ // 表：CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL)
+-//   auth_tokens -> {"accessToken":"…","refreshToken":"…"}
+-//   auth_user   -> {"yid","id","nickname"}
++//   auth_tokens       -> {"accessToken":"…","refreshToken":"…"}（**双层** JSON 字符串）
++//   auth_user         -> {"yid","userId","nickname",...}（userId 也可能叫 id，见 userIdOf）
++//   installation_uuid -> 纯字符串（**不是** JSON 对象）
+ //
+-// 必须只读：桌面端可能正在运行，插件绝不写入它的库。
++// 🔴 为什么是 node:sqlite 而不是 bun:sqlite：
++//    插件宿主是 Bun，但 node:sqlite 在 Bun 1.4.2 与 node v24 双端都可用；
++//    bun:sqlite 在 node 下 import 不了 ⇒ 整个入口在 node 下都加载失败。
++//
++// 🔴 桌面端库**只读**：桌面端可能正在运行，插件绝不写入它的库。
++//    写只发生在「服务器副本」上（server-copy），而且必须显式 writable=true，默认不写。
++//
++// 🔴 桌面端判据**按平台走**（详见 isDesktopPath）：
++//    - win32：桌面端客户端真实存在（可能正在运行）⇒ 桌面端路径一律禁写。
++//    - darwin/linux：dbPath() 指向的路径与**服务器副本**的默认路径重合，
++//      所以它只有在「未被显式声明为服务器副本」时才当作桌面端。
++//    - env.LOBSTER_SERVER_COPY_DB 显式声明的路径永远可写（运维指定的可写副本）。
+ 
+-import { Database } from "bun:sqlite"
+ import { existsSync } from "node:fs"
+-import { join } from "node:path"
++import { win32, posix } from "node:path"
+ import { jwtExp, accountOf } from "./jwt.mjs"
++import { openReadonly, closeDb, readKvMap, readKv, jsonOf } from "./sqlite-kv.mjs"
+ 
+-export function dbPath(env = process.env) {
++// 一次要取的三个键：少了 installation_uuid，续期请求的归因字段永远拿不到 uuid
++export const KV_KEYS = ["auth_tokens", "auth_user", "installation_uuid"]
++
++// 桌面端库路径。platform 可注入（默认 process.platform）。
++// ⚠️ join 用**平台对应**的实现（win32.join / posix.join）：
++//    node:path 的 join 是宿主平台相关的，测试要能在 Windows 上模拟 Linux 布局，
++//    就不能跟着宿主走。真实平台上 win32→win32.join、darwin/linux→posix.join，
++//    与原生 join 逐字相同 ⇒ 生产行为不变。
++export function dbPath(env = process.env, platform = process.platform) {
+   const home = env.HOME || env.USERPROFILE || ""
+-  if (process.platform === "win32") {
++  const join = platform === "win32" ? win32.join : posix.join
++  if (platform === "win32") {
+     const appdata = env.APPDATA || (home ? join(home, "AppData", "Roaming") : "")
+     return join(appdata, "LobsterAI", "lobsterai.sqlite")
+   }
+-  if (process.platform === "darwin") {
++  if (platform === "darwin") {
+     return join(home, "Library", "Application Support", "LobsterAI", "lobsterai.sqlite")
+   }
+   const cfg = env.XDG_CONFIG_HOME || join(home, ".config")
+   return join(cfg, "LobsterAI", "lobsterai.sqlite")
+ }
+ 
+-const parse = (s) => {
++// 服务器上的副本：路径由 env 指定，**没有默认** —— 没有它就不写任何东西
++export function serverCopyPath(env = process.env) {
++  const v = env?.LOBSTER_SERVER_COPY_DB
++  if (typeof v === "string" && v.trim()) return v.trim()
++  return null
++}
++
++// 桌面端路径的候选集合。
++// 判据不能只比一条路径：env 里的 APPDATA 可能缺失或被改写，
++// 因此把「可能的桌面端路径」都算出来再比。
++// ⚠️ platform 可注入：桌面端路径布局随平台不同（%APPDATA% / ~/Library / ~/.config），
++//    测试要能同时验 Windows 与 Linux 两套布局，不必真的换机器。
++export function desktopPathCandidates(env = process.env, platform = process.platform) {
++  const list = new Set()
++  const add = (e) => { try { list.add(dbPath(e, platform)) } catch { /* 忽略 */ } }
++  add(env)
++  // APPDATA 缺失时的两种退化形态
++  const noAppdata = { ...env }
++  delete noAppdata.APPDATA
++  add(noAppdata)
++  const noCfg = { ...noAppdata }
++  delete noCfg.XDG_CONFIG_HOME
++  add(noCfg)
++  return [...list]
++}
++
++// 路径归一：分隔符统一成 /，去掉结尾的 /，再把 . 与 .. 段折叠掉
++//   - normPath：保留大小写（Linux/macOS 上路径**区分**大小写）
++//   - normLoose：再折大小写（Windows 上路径不区分大小写）
++const normPath = (p) => {
++  const raw = String(p).replace(/\\/g, "/").replace(/\/+$/, "")
++  const abs = raw.startsWith("/")
++  const parts = []
++  for (const seg of raw.split("/")) {
++    if (!seg || seg === ".") continue
++    if (seg === "..") { parts.pop(); continue }
++    parts.push(seg)
++  }
++  return (abs ? "/" : "") + parts.join("/")
++}
++const normLoose = (p) => normPath(p).toLowerCase()
++
++// 同一路径的相等判断：win32 不区分大小写，其它平台区分
++const samePath = (a, b, platform) =>
++  platform === "win32" ? normLoose(a) === normLoose(b) : normPath(a) === normPath(b)
++
++// 桌面端库永远只读 —— 但「桌面端库」这个判据要**分平台**：
++//
++// 🔴 为什么不能一刀切：
++//    dbPath() 在 Linux 上返回 ~/.config/LobsterAI/lobsterai.sqlite，
++//    与**服务器副本**的默认路径完全一样。无头服务器上没有正在运行的桌面客户端，
++//    那里同一路径就是「服务器副本」；一刀切会让副本永远回写不了（token 不保鲜）。
++//
++// 判据（两条，顺序不能反）：
++//   1) **显式声明优先**：env.LOBSTER_SERVER_COPY_DB 指向的路径是运维明确指定的
++//      可写副本 —— 桌面端判据对其它路径生效，对它不生效。
++//   2) **平台判据**：win32 上桌面端客户端真实存在（可能正在运行）⇒ 桌面端数据
++//      目录里的任何文件都禁写；darwin/linux 上没有正在运行的桌面客户端，
++//      dbPath() 指向的位置是**服务器副本**的默认位置 ⇒ 它只有在「未被显式声明
++//      为服务器副本」时才当作桌面端。
++export function isDesktopPath(path, env = process.env, platform = process.platform) {
++  if (!path) return false
++  const copy = serverCopyPath(env)
++  // 1) 显式声明的服务器副本：永远可写
++  if (copy && samePath(copy, path, platform)) return false
++  // 2) 桌面端路径：禁写
++  const target = normLoose(path)
++  return desktopPathCandidates(env, platform).some((p) => {
++    const c = normLoose(p)
++    if (c === target) return true
++    // 桌面端数据目录里的**任何**文件都不写（不只是那一个 .sqlite）
++    const dir = c.slice(0, c.lastIndexOf("/"))
++    return dir.length > 0 && target.startsWith(dir + "/")
++  })
++}
++
++// 兼容双层 JSON 的 parse：一次 parse 后若仍是字符串再 parse 一次。
++// 只对「确实是对象」的结果返回它；裸字符串交给 readKv 这类裸值读取器。
++export function parse(raw) {
++  const v = jsonOf(readKvValue(raw))
++  return v
++}
++
++// 单值的归一化（双层 JSON → 对象；裸字符串 → 原样）
++export function readKvValue(raw) {
++  if (raw === null || raw === undefined) return null
++  if (typeof raw !== "string") return raw
++  let v
++  try { v = JSON.parse(raw) } catch { return raw } // 裸值
++  if (typeof v === "string") {
++    try { v = JSON.parse(v) } catch { return v }
++  }
++  return v
++}
++
++// 裸值读取器：直接读任意路径的某个 kv 键。
++// ⚠️ installation_uuid 是纯字符串 —— 用「typeof === object」的守卫读它会直接丢掉。
++export function readKvFromPath(path, key) {
++  const db = openReadonly(path)
++  if (!db) return null
+   try {
+-    const v = JSON.parse(String(s ?? ""))
+-    return v && typeof v === "object" ? v : null
+-  } catch { return null }
++    return readKv(db, key)
++  } finally {
++    closeDb(db)
++  }
+ }
+ 
+-export function readCredentials(path) {
++// auth_user 里的用户 id：客户端的字段名是 **userId**（实测 auth_user 的键是
++// yid/phone/avatarUrl/nickname/enterpriseId/userId/accountMode，**没有 id**），
++// 但 mrv 的旧实现读的是 id —— 两个键名都认，客户端改字段名也不会瞎。
++export function userIdOf(user) {
++  if (!user || typeof user !== "object") return undefined
++  const pick = (v) => (v === undefined || v === null || v === "" ? undefined : v)
++  return pick(user.userId) ?? pick(user.id)
++}
++
++// 读任意路径的凭据副本。路径可以是桌面端库，也可以是服务器副本。
++// writable 只是**记录**这个副本是否被声明为可写（写权限在写函数里再判一次）。
++export function readCredentials(path, { writable = false } = {}) {
+   if (!path || !existsSync(path)) return null
+-  let db
++  const db = openReadonly(path)
++  if (!db) return null
+   try {
+-    // 只读打开：绝不改动桌面端的库
+-    db = new Database(path, { readonly: true })
+-    const rows = db.query("SELECT key, value FROM kv WHERE key IN ('auth_tokens','auth_user')").all()
+-    const byKey = Object.fromEntries(rows.map((r) => [r.key, r.value]))
+-    const tokens = parse(byKey.auth_tokens)
++    const map = readKvMap(db, KV_KEYS)
++    const tokens = jsonOf(map.auth_tokens)
+     const accessToken = String(tokens?.accessToken ?? "")
+     if (!accessToken) return null
+-    const user = parse(byKey.auth_user) ?? {}
++    const user = jsonOf(map.auth_user) ?? {}
+     const claims = accountOf(accessToken)
++    // installation_uuid 是裸字符串：原样取出，不做对象守卫
++    const uuidRaw = map.installation_uuid
++    const installationUuid =
++      uuidRaw === null || uuidRaw === undefined ? "" : String(uuidRaw)
+     return {
+       accessToken,
+       refreshToken: String(tokens?.refreshToken ?? ""),
+       yid: user.yid ?? claims.yid,
+-      id: user.id ?? claims.id,
++      id: userIdOf(user) ?? claims.id,
+       nickname: user.nickname,
+       expires: jwtExp(accessToken),
++      installationUuid,
++      userId: userIdOf(user) ?? claims.id,
++      path,
++      writable: !!writable,
+     }
+   } catch {
+     return null
+   } finally {
+-    try { db?.close() } catch {}
++    closeDb(db)
+   }
+ }
+ 
+@@ -98,3 +236,24 @@ export function desktopToken(env = process.env) {
+   }
+   return c.accessToken
+ }
++
++// 归因字段（uuid / userId）：续期请求要带上。
++// 只从**只读**连接里取，不碰桌面端的写路径。
++export function localAttribution(env = process.env) {
++  const out = { uuid: "", userId: undefined }
++  const db = openReadonly(dbPath(env))
++  if (!db) return out
++  try {
++    const map = readKvMap(db, KV_KEYS)
++    const uuid = map.installation_uuid
++    if (uuid !== null && uuid !== undefined && uuid !== "") out.uuid = String(uuid)
++    const user = jsonOf(map.auth_user)
++    const uid = userIdOf(user)
++    if (uid !== undefined) out.userId = uid
++  } catch {
++    /* 读不到就没有归因字段，不阻断续期 */
++  } finally {
++    closeDb(db)
++  }
++  return out
++}
+diff --git a/lib/auth-login.mjs b/lib/auth-login.mjs
+index 67483cc..7de0e03 100644
+--- a/lib/auth-login.mjs
++++ b/lib/auth-login.mjs
+@@ -5,19 +5,21 @@
+ // /auth/callback + 有端口），因此插件可以自带登录，不依赖桌面端。
+ // 参数必须追加到登录页的 hash query，不是 URL query；且必须带
+ // source=electron，否则 portal 不会带上 redirect_uri。
++//
++// ⚠️ 出站地址可注入：env LOBSTER_API_BASE（API 根）/ LOBSTER_LOGIN_URL（登录页）。
+ 
+ import { createServer } from "node:http"
+ import { randomBytes } from "node:crypto"
+-import { API, LOGIN_URL } from "./constants.mjs"
++import { apiUrl, loginUrl } from "./constants.mjs"
+ import { jwtExp, accountOf } from "./jwt.mjs"
+ 
+ const TIMEOUT_MS = 5 * 60 * 1000
+ 
+-export function authorizeUrl(loginUrl, callbackUrl, state) {
+-  const base = loginUrl || LOGIN_URL
+-  const hashAt = base.indexOf("#")
+-  const head = hashAt === -1 ? base : base.slice(0, hashAt)
+-  const hash = hashAt === -1 ? "" : base.slice(hashAt + 1)
++export function authorizeUrl(base, callbackUrl, state) {
++  const head0 = base || loginUrl()
++  const hashAt = head0.indexOf("#")
++  const head = hashAt === -1 ? head0 : head0.slice(0, hashAt)
++  const hash = hashAt === -1 ? "" : head0.slice(hashAt + 1)
+   const [route, query = ""] = hash.split("?")
+   const q = new URLSearchParams(query)
+   q.set("source", "electron")
+@@ -39,7 +41,9 @@ function listenOnce() {
+       if (u.pathname !== "/auth/callback") { res.writeHead(404).end(); return }
+       const code = u.searchParams.get("code")
+       const state = u.searchParams.get("state")
+-      res.writeHead(200, { "content-type": "text/html; charset=utf-8" })
++      // connection: close —— 一次性回调服务不该留 keep-alive 连接：
++      // 客户端拿着空闲 socket，进程退出时 Windows 上会撞 libuv 断言。
++      res.writeHead(200, { "content-type": "text/html; charset=utf-8", connection: "close" })
+       res.end(code
+         ? "<h2>登录成功，可以关闭此页面。</h2>"
+         : "<h2>登录失败：没有拿到授权码。</h2>")
+@@ -52,6 +56,10 @@ function listenOnce() {
+         port,
+         close() {
+           if (timer) clearTimeout(timer)
++          // 先掐掉还开着的连接再 close：回调那条连接（以及 keep-alive 的
++          // 空闲连接）留着的话，Windows 上进程退出时 libuv 会撞上
++          // UV_HANDLE_CLOSING 断言而整段 abort。
++          try { server.closeAllConnections?.() } catch {}
+           try { server.close() } catch {}
+         },
+         result(ms) {
+@@ -68,8 +76,8 @@ function listenOnce() {
+   })
+ }
+ 
+-async function exchangeCode(code) {
+-  const res = await fetch(`${API}/auth/exchange`, {
++async function exchangeCode(code, { env = process.env, fetchImpl = fetch } = {}) {
++  const res = await fetchImpl(apiUrl(env) + "/auth/exchange", {
+     method: "POST",
+     headers: { "content-type": "application/json" },
+     body: JSON.stringify({ authCode: code, firstKeyfrom: "official", latestKeyfrom: "official" }),
+@@ -88,17 +96,17 @@ async function exchangeCode(code) {
+ // beginSignIn 起回调服务并拼出授权地址，然后把「等回调并换 token」交给
+ // finish()。分成两半是因为由 magpie 负责打开 authorize 返回的 url ——
+ // 插件自己再开一次就会开两个标签页。
+-export async function beginSignIn({ timeoutMs = TIMEOUT_MS } = {}) {
++export async function beginSignIn({ timeoutMs = TIMEOUT_MS, env = process.env, fetchImpl = fetch } = {}) {
+   const state = randomBytes(24).toString("base64url")
+   const listening = await listenOnce()
+   const callbackUrl = `http://127.0.0.1:${listening.port}/auth/callback`
+-  const url = authorizeUrl(LOGIN_URL, callbackUrl, state)
++  const url = authorizeUrl(loginUrl(env), callbackUrl, state)
+ 
+   const finish = async () => {
+     try {
+       const got = await listening.result(timeoutMs)
+       if (got.state !== state) throw new Error("登录回调的 state 不匹配，已忽略")
+-      const data = await exchangeCode(got.code)
++      const data = await exchangeCode(got.code, { env, fetchImpl })
+       const access = String(data.accessToken ?? "")
+       if (!access) throw new Error("LobsterAI 没有返回 accessToken")
+       const who = accountOf(access)
+@@ -119,8 +127,8 @@ export async function beginSignIn({ timeoutMs = TIMEOUT_MS } = {}) {
+ 
+ // signIn 是 beginSignIn 的「自己开浏览器」封装：给命令行与测试用。
+ // open 可注入，因此测试里不必真的弹浏览器。
+-export async function signIn({ open, timeoutMs = TIMEOUT_MS } = {}) {
+-  const pending = await beginSignIn({ timeoutMs })
++export async function signIn({ open, timeoutMs = TIMEOUT_MS, env = process.env, fetchImpl = fetch } = {}) {
++  const pending = await beginSignIn({ timeoutMs, env, fetchImpl })
+   try {
+     await open(pending.url)
+     return await pending.finish()
+diff --git a/lib/constants.mjs b/lib/constants.mjs
+index e33fca2..c1643ec 100644
+--- a/lib/constants.mjs
++++ b/lib/constants.mjs
+@@ -1,24 +1,66 @@
+ // LobsterAI（有道龙虾）的固定事实：地址、客户端标识、未登录时的兜底模型表。
+ // 兜底表只在没登录时显示；登录后由 /api/models/available 的实时结果替换。
++//
++// ⚠️ 版本号不写死：clientVersion() 走 lib/version.mjs，跟着客户端 asar 里的真版本走。
++//    写死必然腐化 —— 参考插件写死 2026.9.23、mrv 写死 2026.9.15，实测真版本已是 2026.10.16。
++//
++// ⚠️ 出站地址全部可注入：env LOBSTER_API_BASE 指向 API 根（默认 .../api），
++//    离线测试把它指到 mock 即可，不必改代码。
++
++import { clientVersion as resolveClientVersion } from "./version.mjs"
+ 
+ export const PROVIDER = "lobster"
+ export const NAME = "LobsterAI"
+-export const BASE = "https://lobsterai-server.youdao.com"
+-export const API = BASE + "/api"
+-export const CHAT_BASE = BASE + "/api/proxy/v1"
++
++export const DEFAULT_BASE = "https://lobsterai-server.youdao.com"
++export const DEFAULT_API = DEFAULT_BASE + "/api"
++export const DEFAULT_CHAT_BASE = DEFAULT_BASE + "/api/proxy/v1"
++
++// 这三个是「默认值」；运行时一律走下面那几个可注入的函数
++export const BASE = DEFAULT_BASE
++export const API = DEFAULT_API
++export const CHAT_BASE = DEFAULT_CHAT_BASE
++
+ export const NPM = "@ai-sdk/openai-compatible"
+ 
+ export const LOGIN_URL = "https://lobsterai.youdao.com/portal#/login"
+ export const ICON = "https://lobsterai.youdao.com/portal/lobsterai-logo.png"
+ 
+-// 桌面端 2026.9.23 发的标识头；上游不强制，但可能影响特性开关
+-export const CLIENT_VERSION = "2026.9.23"
+ export const CAPABILITIES = "kimi-k3-agentic-v1,thinking-level-control-v1"
+ 
+ // 接口不提供输出上限，取一个保守值（见设计文档 §8）
+ export const DEFAULT_OUTPUT = 32000
+ export const DEFAULT_CONTEXT = 1000000
+ 
++// API 根：env LOBSTER_API_BASE 优先，默认 https://lobsterai-server.youdao.com/api
++export function apiUrl(env = process.env) {
++  const v = env?.LOBSTER_API_BASE
++  if (typeof v === "string" && v.trim()) return v.trim().replace(/\/+$/, "")
++  return DEFAULT_API
++}
++
++// 对话端点（OpenAI 兼容）在 API 根下面
++export function chatBaseUrl(env = process.env) {
++  return apiUrl(env) + "/proxy/v1"
++}
++
++// 服务器根（去掉尾部的 /api）
++export function serverBaseUrl(env = process.env) {
++  return apiUrl(env).replace(/\/api$/, "")
++}
++
++// 浏览器登录页：env LOBSTER_LOGIN_URL 可覆盖（离线测试用）
++export function loginUrl(env = process.env) {
++  const v = env?.LOBSTER_LOGIN_URL
++  if (typeof v === "string" && v.trim()) return v.trim()
++  return LOGIN_URL
++}
++
++// 客户端版本：动态求值（每个进程读一次 asar 后缓存）
++export function clientVersion(env = process.env, log = null) {
++  return resolveClientVersion({ env, log })
++}
++
+ export function configModel({ name, context, output, reasoning, image }) {
+   const input = ["text"]
+   if (image) input.push("image")
+@@ -31,11 +73,16 @@ export function configModel({ name, context, output, reasoning, image }) {
+   }
+ }
+ 
+-// 兜底：未登录时让用户看到 provider 存在。字段来自实测的模型目录。
++// 静态兜底表：mrv 的 7 个 ∪ 参考插件的 5 个（并集 8 个）。
++// ⚠️ kimi-k3 不在云端 /api/models/available 的 29 个里，但实际可用
++//    ⇒ 必须留在这张表里，否则登录后也看不到它。
+ export const FALLBACK_MODELS = {
+-  "deepseek-v4-pro": configModel({ name: "DeepSeek V4 Pro", reasoning: true }),
+   "deepseek-flash": configModel({ name: "DeepSeek Flash", reasoning: true }),
++  "deepseek-v4-pro": configModel({ name: "DeepSeek V4 Pro", reasoning: true }),
+   "glm-5.3": configModel({ name: "GLM-5.3", reasoning: true }),
+-  "kimi-k3": configModel({ name: "Kimi K3", reasoning: true, image: true }),
++  "glm-5.3-flash": configModel({ name: "GLM-5.3 Flash", reasoning: true }),
++  "glm-5.3-flashx": configModel({ name: "GLM-5.3 FlashX", reasoning: true }),
++  "MiniMax-M3": configModel({ name: "MiniMax M3", reasoning: true }),
+   "qwen3.8-max": configModel({ name: "Qwen3.8 Max", reasoning: true }),
++  "kimi-k3": configModel({ name: "Kimi K3", reasoning: true, image: true }),
+ }
+diff --git a/lib/models.mjs b/lib/models.mjs
+index 852ba31..cbdf144 100644
+--- a/lib/models.mjs
++++ b/lib/models.mjs
+@@ -58,6 +58,92 @@ export function profileOfFrom(list) {
+   return out
+ }
+ 
++
++// ── openclaw 托管目录 → magpie 的运行时模型 ──────────────────────────
++// 云端没有 /models 路径（实测 404），目录由客户端 openclaw 托管配置同步到本地。
++// 这一层是**正常降级**：读不到就返回 null，绝不抛异常。
++//
++// openclaw 条目形状：{ id, name(上游真名), input[], contextWindow, reasoning }
++// → magpie 形状：id+api.id / name / limit.context / capabilities.input+attachment / capabilities.reasoning
++export function managedModel(entry, base = {}) {
++  const id = String(entry?.id ?? "")
++  if (!id) return null
++  const input = Array.isArray(entry.input) && entry.input.length ? entry.input : ["text"]
++  const image = input.includes("image")
++  const reasoning = entry.reasoning === true
++  return {
++    ...base,
++    id,
++    providerID: base.providerID,
++    name: String(entry.name ?? id),
++    api: { id, url: "", npm: NPM },
++    status: "active",
++    headers: {},
++    options: {},
++    cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
++    limit: { context: Number(entry.contextWindow) || DEFAULT_CONTEXT, output: DEFAULT_OUTPUT },
++    capabilities: {
++      temperature: true,
++      reasoning,
++      attachment: image,
++      toolcall: true,
++      input: { text: true, image, audio: false, video: false, pdf: false },
++      output: { text: true, image: false, audio: false, video: false, pdf: false },
++      interleaved: false,
++    },
++    release_date: "",
++    // 托管目录不带 thinkingConfig ⇒ 不给档位（宁可不发，也别发错档位表）
++    variants: {},
++    rate: 0,
++  }
++}
++
++export function modelsFromManaged(list, provider) {
++  const out = {}
++  for (const entry of Array.isArray(list) ? list : []) {
++    const m = managedModel(entry, { providerID: provider?.id })
++    if (!m) continue
++    out[m.id] = m
++  }
++  return out
++}
++
++
++// 扁平 config 形状（constants.configModel 产出的）→ magpie 的运行时模型。
++// 静态兜底表是扁平形状，但 provider.models 要的是运行时形状 ⇒ 这里做一次转换。
++export function modelsFromConfig(map, provider) {
++  const out = {}
++  for (const [id, m] of Object.entries(map ?? {})) {
++    if (!id || !m) continue
++    const input = Array.isArray(m.modalities?.input) ? m.modalities.input : ["text"]
++    const image = input.includes("image")
++    out[id] = {
++      id,
++      providerID: provider?.id,
++      name: String(m.name ?? id),
++      api: { id, url: "", npm: NPM },
++      status: "active",
++      headers: {},
++      options: {},
++      cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
++      limit: { context: Number(m.limit?.context) || DEFAULT_CONTEXT, output: Number(m.limit?.output) || DEFAULT_OUTPUT },
++      capabilities: {
++        temperature: true,
++        reasoning: !!m.reasoning,
++        attachment: image,
++        toolcall: m.tool_call !== false,
++        input: { text: true, image, audio: false, video: false, pdf: false },
++        output: { text: true, image: false, audio: false, video: false, pdf: false },
++        interleaved: false,
++      },
++      release_date: "",
++      variants: {},
++      rate: 0,
++    }
++  }
++  return out
++}
++
+ // 未登录时 config 钩子用的扁平形状
+ export function configModels(list) {
+   const out = {}
+diff --git a/lib/proxy.mjs b/lib/proxy.mjs
+index 94fa495..3fbc29d 100644
+--- a/lib/proxy.mjs
++++ b/lib/proxy.mjs
+@@ -7,7 +7,7 @@
+ import { sse, first } from "./sse.mjs"
+ import { respond } from "./assemble.mjs"
+ import { applyThinking, applyKimiK3, isKimiK3 } from "./thinking.mjs"
+-import { CLIENT_VERSION, CAPABILITIES } from "./constants.mjs"
++import { CAPABILITIES, clientVersion } from "./constants.mjs"
+ 
+ const LIMIT_WORDS = /限流|频率|过快|过于频繁|rate ?limit|too many/i
+ 
+@@ -40,7 +40,9 @@ function errorResponse(status, code, message) {
+ 
+ // tokenOf 由调用方注入：桌面端导入的账号自己不存 token，得每次现读，
+ // 因此这里不能写死「oauth 读 access、api 读 key」。
+-export function makeFetch({ getAuth, tokenOf, profileOf, call }) {
++//
++// version 由调用方注入（默认动态取客户端版本）：版本号写死必然腐化。
++export function makeFetch({ getAuth, tokenOf, profileOf, call, version, env = process.env }) {
+   return async function lobsterFetch(input, init) {
+     const auth = await getAuth()
+     if (auth?.type !== "api" && auth?.type !== "oauth") {
+@@ -75,7 +77,8 @@ export function makeFetch({ getAuth, tokenOf, profileOf, call }) {
+     const headers = new Headers(init?.headers)
+     headers.set("authorization", `Bearer ${token}`)
+     headers.set("content-type", "application/json")
+-    headers.set("X-LobsterAI-Client-Version", CLIENT_VERSION)
++    // 动态版本号：跟着客户端 asar 里的真版本走，不写死
++    headers.set("X-LobsterAI-Client-Version", String(version ?? clientVersion(env)))
+     headers.set("X-LobsterAI-Client-Capabilities", CAPABILITIES)
+     headers.delete("content-length")
+ 
+diff --git a/package.json b/package.json
+index 3323451..44a7b27 100644
+--- a/package.json
++++ b/package.json
+@@ -1,7 +1,7 @@
+ {
+-  "name": "opencode-lobster-auth",
+-  "version": "0.1.1",
+-  "description": "OpenCode provider plugin: NetEase Youdao LobsterAI (有道龙虾)",
++  "name": "magpie-lobster-auth",
++  "version": "0.2.0",
++  "description": "magpie provider plugin: NetEase Youdao LobsterAI (有道龙虾) — merged build (reference plugin + reverse-engineered capabilities + server-side zero-interaction sign-in)",
+   "type": "module",
+   "main": "./index.mjs",
+   "exports": "./index.mjs",
+@@ -13,15 +13,19 @@
+     "LICENSE"
+   ],
+   "keywords": [
+-    "opencode",
+-    "opencode-plugin",
+     "magpie",
++    "magpie-plugin",
+     "lobster",
+     "lobsterai",
+-    "youdao"
++    "youdao",
++    "opencode",
++    "opencode-plugin"
+   ],
+   "license": "MIT",
+   "author": "Jasery <jaserydev@163.com>",
++  "contributors": [
++    "Jasery <jaserydev@163.com>"
++  ],
+   "repository": {
+     "type": "git",
+     "url": "git+https://github.com/Jasery/opencode-lobster-auth.git"
+@@ -29,7 +33,8 @@
+   "homepage": "https://github.com/Jasery/opencode-lobster-auth#readme",
+   "bugs": "https://github.com/Jasery/opencode-lobster-auth/issues",
+   "scripts": {
+-    "test": "bun test"
++    "test": "bun test",
++    "test:node": "node --test --test-force-exit \"test/**/*.test.mjs\""
+   },
+   "magpie": {
+     "maxConcurrency": 8,
+diff --git a/test/assemble.test.mjs b/test/assemble.test.mjs
+index 4b48bbc..d9a9ac8 100644
+--- a/test/assemble.test.mjs
++++ b/test/assemble.test.mjs
+@@ -1,4 +1,4 @@
+-import { test, expect } from "bun:test"
++import { test, expect } from "./harness.mjs"
+ import { respond, mergeChunks } from "../lib/assemble.mjs"
+ 
+ async function* from(list) { for (const d of list) yield { event: "", data: d } }
+diff --git a/test/auth-import.test.mjs b/test/auth-import.test.mjs
+index cffb2a4..eaeff62 100644
+--- a/test/auth-import.test.mjs
++++ b/test/auth-import.test.mjs
+@@ -1,5 +1,7 @@
+-import { test, expect } from "bun:test"
+-import { Database } from "bun:sqlite"
++import { test, expect } from "./harness.mjs"
++// 用 node:sqlite 而不是 bun:sqlite：bun:sqlite 在 node 下根本 import 不了，
++// 整个测试文件在 node --test 下会加载失败。
++import { DatabaseSync } from "node:sqlite"
+ import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
+ import { tmpdir } from "node:os"
+ import { dirname, join } from "node:path"
+@@ -8,15 +10,19 @@ import { dbPath, readCredentials, desktopSignIn, desktopToken } from "../lib/aut
+ const b64 = (o) => Buffer.from(JSON.stringify(o)).toString("base64url")
+ const TOKEN = `h.${b64({ sub: 67097, yid: "urs-phoneyd.abc@163.com", exp: 1793152423 })}.s`
+ 
++// 写入用 exec() 而不是 prepare()：Bun 的 node:sqlite 里 prepare() 会把文件句柄
++// 留到 GC，Windows 上临时目录就删不掉了（EBUSY）。
++const lit = (v) => "'" + String(v).replace(/'/g, "''") + "'"
++
+ function makeDb({ tokens = TOKEN, user = '{"yid":"urs-phoneyd.abc@163.com","id":67097,"nickname":"Ada"}' } = {}) {
+   const dir = mkdtempSync(join(tmpdir(), "lobster-test-"))
+   const file = join(dir, "lobsterai.sqlite")
+-  const db = new Database(file, { create: true })
+-  db.run("CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL)")
++  const db = new DatabaseSync(file)
++  db.exec("CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL)")
+   if (tokens !== null) {
+-    db.run("INSERT INTO kv VALUES (?,?,?)", ["auth_tokens", JSON.stringify({ accessToken: tokens, refreshToken: "r" }), 0])
++    db.exec(`INSERT INTO kv (key, value, updated_at) VALUES ('auth_tokens', ${lit(JSON.stringify({ accessToken: tokens, refreshToken: "r" }))}, 0)`)
+   }
+-  if (user !== null) db.run("INSERT INTO kv VALUES (?,?,?)", ["auth_user", user, 0])
++  if (user !== null) db.exec(`INSERT INTO kv (key, value, updated_at) VALUES ('auth_user', ${lit(user)}, 0)`)
+   db.close()
+   return { dir, file }
+ }
+@@ -55,11 +61,11 @@ function makeDesktop({ tokens = TOKEN } = {}) {
+   const env = { APPDATA: dir, HOME: dir, USERPROFILE: dir, XDG_CONFIG_HOME: dir }
+   const file = dbPath(env)
+   mkdirSync(dirname(file), { recursive: true })
+-  const db = new Database(file, { create: true })
+-  db.run("CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL)")
++  const db = new DatabaseSync(file)
++  db.exec("CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL)")
+   if (tokens !== null) {
+-    db.run("INSERT INTO kv VALUES (?,?,?)", ["auth_tokens", JSON.stringify({ accessToken: tokens, refreshToken: "r" }), 0])
+-    db.run("INSERT INTO kv VALUES (?,?,?)", ["auth_user", '{"yid":"urs-phoneyd.abc@163.com","id":67097,"nickname":"Ada"}', 0])
++    db.exec(`INSERT INTO kv (key, value, updated_at) VALUES ('auth_tokens', ${lit(JSON.stringify({ accessToken: tokens, refreshToken: "r" }))}, 0)`)
++    db.exec(`INSERT INTO kv (key, value, updated_at) VALUES ('auth_user', ${lit('{"yid":"urs-phoneyd.abc@163.com","id":67097,"nickname":"Ada"}')}, 0)`)
+   }
+   db.close()
+   return { dir, env }
+@@ -94,8 +100,8 @@ test("the desktop token is read fresh each time", () => {
+     expect(desktopToken(env)).toBe(TOKEN)
+     // 桌面端续期后，插件下一次调用立刻用上新的 token
+     const other = `h.${b64({ sub: 67097, yid: "urs-phoneyd.abc@163.com", exp: 1793152423 })}.s2`
+-    const db = new Database(dbPath(env))
+-    db.run("UPDATE kv SET value=? WHERE key='auth_tokens'", [JSON.stringify({ accessToken: other, refreshToken: "r" })])
++    const db = new DatabaseSync(dbPath(env))
++    db.exec(`UPDATE kv SET value=${lit(JSON.stringify({ accessToken: other, refreshToken: "r" }))} WHERE key='auth_tokens'`)
+     db.close()
+     expect(desktopToken(env)).toBe(other)
+   } finally { rmSync(dir, { recursive: true, force: true }) }
+@@ -113,8 +119,8 @@ test("an unreadable desktop token is reported as a lapsed sign-in", () => {
+ test("junk in the row reads as null", () => {
+   const { dir, file } = makeDb({ tokens: null, user: null })
+   try {
+-    const db = new Database(file)
+-    db.run("INSERT INTO kv VALUES (?,?,?)", ["auth_tokens", "not json", 0])
++    const db = new DatabaseSync(file)
++    db.exec("INSERT INTO kv (key, value, updated_at) VALUES ('auth_tokens', 'not json', 0)")
+     db.close()
+     expect(readCredentials(file)).toBeNull()
+   } finally { rmSync(dir, { recursive: true, force: true }) }
+diff --git a/test/auth-login.test.mjs b/test/auth-login.test.mjs
+index b9fcc66..6cf48a7 100644
+--- a/test/auth-login.test.mjs
++++ b/test/auth-login.test.mjs
+@@ -1,5 +1,6 @@
+-import { test, expect } from "bun:test"
+-import { authorizeUrl } from "../lib/auth-login.mjs"
++import { test, expect } from "./harness.mjs"
++import { createServer } from "node:http"
++import { authorizeUrl, signIn } from "../lib/auth-login.mjs"
+ 
+ test("login params ride the hash query, as the portal expects", () => {
+   const u = new URL(authorizeUrl(
+@@ -25,34 +26,47 @@ test("return_to points back at the login page's success state", () => {
+   expect(q.get("source")).toBe("electron")
+ })
+ 
+-import { signIn } from "../lib/auth-login.mjs"
++// 用 node:http 起假服务端，不用 Bun.serve —— 后者在 node 下不存在。
++function serveFakeApi(token) {
++  return new Promise((resolve) => {
++    const server = createServer((req, res) => {
++      if (req.url === "/api/auth/exchange") {
++        res.writeHead(200, { "content-type": "application/json" })
++        res.end(JSON.stringify({ code: 0, message: "OK", data: { accessToken: token, refreshToken: "rt" } }))
++        return
++      }
++      res.writeHead(404)
++      res.end("nope")
++    })
++    server.listen(0, "127.0.0.1", () => {
++      resolve({ server, port: server.address().port })
++    })
++  })
++}
+ 
+ test("signIn completes the loopback callback and returns an oauth account", async () => {
+   const b64 = (o) => Buffer.from(JSON.stringify(o)).toString("base64url")
+   const token = `h.${b64({ sub: 67097, yid: "u@x.com", exp: 1793152423 })}.s`
+ 
+-  const server = Bun.serve({
+-    port: 0,
+-    async fetch(req) {
+-      const u = new URL(req.url)
+-      if (u.pathname === "/api/auth/exchange") {
+-        return Response.json({ code: 0, message: "OK", data: { accessToken: token, refreshToken: "rt" } })
+-      }
+-      return new Response("nope", { status: 404 })
+-    },
+-  })
++  const { server, port } = await serveFakeApi(token)
+ 
+-  // 把 exchange 指向假服务端
++  // 把 exchange 指向假服务端。
++  // 用注入的 fetchImpl，不改全局 fetch：全局 fetch 的 keep-alive 连接池
++  // 在进程退出时会撞上 libuv 的 UV_HANDLE_CLOSING 断言。
+   const orig = globalThis.fetch
+-  globalThis.fetch = (input, init) => {
++  const fetchImpl = (input, init) => {
+     const s = String(input)
+-    return s.includes("/api/auth/exchange")
+-      ? orig(s.replace(/^https?:\/\/[^/]+/, `http://127.0.0.1:${server.port}`), init)
+-      : orig(input, init)
++    const url = s.includes("/api/auth/exchange")
++      ? s.replace(/^https?:\/\/[^/]+/, `http://127.0.0.1:${port}`)
++      : s
++    const headers = new Headers(init?.headers)
++    headers.set("connection", "close")
++    return orig(url, { ...init, headers })
+   }
+ 
+   try {
+     const out = await signIn({
++      fetchImpl,
+       open: async (url) => {
+         // 假装用户在浏览器里登录：直接把 code 回调到 redirect_uri
+         const q = new URLSearchParams(new URL(url).hash.split("?")[1])
+@@ -68,7 +82,8 @@ test("signIn completes the loopback callback and returns an oauth account", asyn
+     expect(out.refresh).toBe("rt")
+     expect(out.accountId).toBe("u@x.com")
+   } finally {
+-    globalThis.fetch = orig
+-    server.stop(true)
++    // 先掐连接再关：否则 keep-alive 的空闲 socket 会在进程退出时撞 libuv 断言
++    try { server.closeAllConnections?.() } catch {}
++    await new Promise((r) => server.close(r))
+   }
+ })
+diff --git a/test/constants.test.mjs b/test/constants.test.mjs
+index 7722a65..68aecd4 100644
+--- a/test/constants.test.mjs
++++ b/test/constants.test.mjs
+@@ -1,4 +1,4 @@
+-import { test, expect } from "bun:test"
++import { test, expect } from "./harness.mjs"
+ import { PROVIDER, NAME, BASE, CHAT_BASE, NPM, FALLBACK_MODELS, configModel } from "../lib/constants.mjs"
+ 
+ test("provider identity is stable", () => {
+diff --git a/test/jwt.test.mjs b/test/jwt.test.mjs
+index 37838e6..36e1fc5 100644
+--- a/test/jwt.test.mjs
++++ b/test/jwt.test.mjs
+@@ -1,4 +1,4 @@
+-import { test, expect } from "bun:test"
++import { test, expect } from "./harness.mjs"
+ import { jwtPayload, jwtExp, accountOf } from "../lib/jwt.mjs"
+ 
+ const b64 = (o) => Buffer.from(JSON.stringify(o)).toString("base64url")
+diff --git a/test/models.test.mjs b/test/models.test.mjs
+index dc02bdd..9aaba3b 100644
+--- a/test/models.test.mjs
++++ b/test/models.test.mjs
+@@ -1,4 +1,4 @@
+-import { test, expect } from "bun:test"
++import { test, expect } from "./harness.mjs"
+ import { modelsFromCatalog, profileOfFrom, runtimeModel } from "../lib/models.mjs"
+ 
+ // 实测自 /api/models/available 的条目形状
+diff --git a/test/plugin.test.mjs b/test/plugin.test.mjs
+index f31c198..10ba46c 100644
+--- a/test/plugin.test.mjs
++++ b/test/plugin.test.mjs
+@@ -1,4 +1,4 @@
+-import { test, expect } from "bun:test"
++import { test, expect } from "./harness.mjs"
+ import { tmpdir } from "node:os"
+ import { join } from "node:path"
+ import { LobsterAuthPlugin as plugin, _internal } from "../index.mjs"
+@@ -29,12 +29,14 @@ test("config declares the provider when absent", async () => {
+   expect(Object.keys(cfg.provider[PROVIDER].models).length).toBeGreaterThan(0)
+ })
+ 
+-test("both sign-in methods are offered", async () => {
++test("all three sign-in methods are offered", async () => {
+   const hooks = await plugin({})
+   const kinds = hooks.auth.methods.map((m) => m.type)
+-  // 两条都必须是 oauth：api 类型会逼 magpie 从 stdin 读一个 key，
+-  // 而「导入本机登录」这条路不需要用户输入任何东西。
+-  expect(kinds).toEqual(["oauth", "oauth"])
++  // 三条都必须是 oauth：api 类型会逼 magpie 从 stdin 读一个 key，
++  // 而「导入本机登录」「服务器副本导入」这两条路不需要用户输入任何东西。
++  // 下标是契约：0 浏览器 / 1 本机导入 / 2 服务器副本导入。
++  expect(kinds).toEqual(["oauth", "oauth", "oauth"])
++  expect(hooks.auth.methods[2].label).toContain("服务器副本")
+   expect(hooks.auth.provider).toBe(PROVIDER)
+   expect(hooks.auth.refreshLead).toBeGreaterThan(0)
+ })
+diff --git a/test/proxy.test.mjs b/test/proxy.test.mjs
+index a14f783..ba85497 100644
+--- a/test/proxy.test.mjs
++++ b/test/proxy.test.mjs
+@@ -1,4 +1,4 @@
+-import { test, expect } from "bun:test"
++import { test, expect } from "./harness.mjs"
+ import { errorOf, statusFor, makeFetch } from "../lib/proxy.mjs"
+ 
+ test("errorOf reads the proxy's nested error envelope", () => {
+diff --git a/test/sse.test.mjs b/test/sse.test.mjs
+index 9403750..9963319 100644
+--- a/test/sse.test.mjs
++++ b/test/sse.test.mjs
+@@ -1,4 +1,4 @@
+-import { test, expect } from "bun:test"
++import { test, expect } from "./harness.mjs"
+ import { sse, first, chain } from "../lib/sse.mjs"
+ 
+ async function* from(list) { for (const s of list) yield new TextEncoder().encode(s) }
+diff --git a/test/thinking.test.mjs b/test/thinking.test.mjs
+index ff410e5..9edcd4a 100644
+--- a/test/thinking.test.mjs
++++ b/test/thinking.test.mjs
+@@ -1,4 +1,4 @@
+-import { test, expect } from "bun:test"
++import { test, expect } from "./harness.mjs"
+ import { levelOf, variantsOf, applyThinking, isKimiK3, applyKimiK3 } from "../lib/thinking.mjs"
+ 
+ // 实测自 deepseek-flash 的 thinkingConfig
+diff --git a/test/usage.test.mjs b/test/usage.test.mjs
+index a7a22dd..30d5c3e 100644
+--- a/test/usage.test.mjs
++++ b/test/usage.test.mjs
+@@ -1,4 +1,4 @@
+-import { test, expect } from "bun:test"
++import { test, expect } from "./harness.mjs"
+ import { usageFrom } from "../lib/usage.mjs"
+ 
+ // 实测自 /api/user/quota 与 /api/user/profile-summary
