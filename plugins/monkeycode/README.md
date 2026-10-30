@@ -21,9 +21,13 @@ magpie plugin add /path/to/monkeycode
 装完刷新一下 magpie（web 界面或 `magpie` 重启），供应商列表里会出现两行：
 
 ```
-MonkeyCode 国内版 (25 models)   not signed in · magpie plugin login monkeycode
+MonkeyCode 国内版 (14 models)   not signed in · magpie plugin login monkeycode
 MonkeyCode 国际版 (25 models)   not signed in · magpie plugin login monkeycode-intl
 ```
+
+> 模型数随**账号套餐**变：国内版登录后显示 **14**（basic 档 = 6 个 `monkeycode-basic/*`
+> + 8 个无档位名；11 个 `pro`/`ultra` 型号对 basic 账号不可见，会 403）。
+> 未登录时按全量 25 个展示。详见 `docs/17-MonkeyCode插件接入与自主续期.md` §五。
 
 ## 登录（三条路）
 
@@ -94,8 +98,10 @@ A 通道的「每日临时额度」**不领就是 0** ⇒ 上游回 `400 余额�
 |---|---|
 | `MONKEYCODE_CONFIG_DIR` | 客户端配置目录（整体覆盖） |
 | `MONKEYCODE_COOKIE_FILE` | 会话 cookie 文件 |
+| `MONKEYCODE_SESSION` | 直接注入控制台会话 cookie（优先于 cookie 文件） |
 | `BAIZHI_COOKIE_FILE` | 百智云（A 通道）会话 cookie 文件 |
 | `MONKEYCODE_CREDENTIALS_FILE` | 口令库路径（默认 `~/.config/magpie/monkeycode-credentials.json`） |
+| `MONKEYCODE_ACCOUNT_ROOT` / `MONKEYCODE_ACCOUNT_DIRS` | 扫描多个客户端账号目录（多账号 / 多地区） |
 | `MONKEYCODE_API_BASE` / `MONKEYCODE_CONSOLE_BASE` | 端点覆盖（私有化部署 / 测试） |
 
 ## 测试
@@ -109,5 +115,12 @@ npm run test:node
 
 - 上游客户端：[chaitin/MonkeyCode](https://github.com/chaitin/MonkeyCode)（`desktop/src/baizhi/`）
 - 社区插件：[xxhhlk/magpie-monkeycode-plugin](https://github.com/xxhhlk/magpie-monkeycode-plugin)
+
+## 项目文档
+
+- `docs/17-MonkeyCode插件接入与自主续期.md` —— fork 动机、已修 bug、自主续期、多账号、套餐过滤。
+- `docs/16-MonkeyCode双通道与签到.md` —— 两条通道的端点、各自的签到与会话有效期。
+- `docs/18-magpie插件宿主契约.md` —— 本插件依赖的 magpie 宿主机制（导出、登录编号、oauth 形状、
+  `auth.refresh`、账号槽位、过期表现、签到 tick、判定口径）。
 
 MIT License，见 [LICENSE](./LICENSE)。

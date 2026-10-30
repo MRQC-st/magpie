@@ -1,7 +1,7 @@
 # 13 · ZCode 账号导入 magpie 记录（2026-10-30）
 
 > **本文是什么**：把本机 zcode-switch 管理的 3 个 z.ai 账号导入 magpie 内置 `zcode` provider 的决策、事实核验与实施记录（SSOT）。
-> **本文不负责**：magpie 网关部署（→ `01`）、LobsterAI 插件迁移（→ `10/11/12`）、zcode-switch 应用本身的构建与账号管理（其仓库为上游克隆，无自建 docs）。
+> **本文不负责**：magpie 网关部署（→ `01`）、LobsterAI 插件迁移（→ `10/11/12`）、zcode-switch 应用本身的构建与账号管理（其仓库为上游克隆，无自建 docs）、**插件宿主通用机制**（→ `18`）。
 
 ## 一、目标与背景
 
