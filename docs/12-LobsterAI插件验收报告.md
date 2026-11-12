@@ -124,7 +124,7 @@ isDesktopPath(copy) = true                                              ← 误�
 - **后续应用迁移**：本试点建立的 6 项能力、三条断言、回写判据可直接复用到其余 14 个适配器（zen/autoclaw/workbuddy/teleagent/copilot/monkeycode/evox/qoder/trae/kilo/phanthy/verdent/genspark）
 - **回滚保险已在位**：`~/magpie-backups/20261027-204732/`（三份配置）；回滚命令见第八节
 - **仓库已初始化 git**（原建议项，2026-10-28 完成）：`D:\projects\magpie` 现在是 git 仓库（branch `main`），
-  插件目录去掉嵌套 `.git` 后作为普通文件纳管，上游历史保留在仓库外 `D:\projects\magpie-upstream-lobster.git`。
+  插件目录去掉嵌套 `.git` 后作为普通文件纳管，上游历史保留在仓库外 `D:\projects\magpie-upstream-lobster.git`（**该镜像已于 2026-11-12 移除**，重建命令见 `00-项目总览.md` §外部依赖）。
   > **为什么会误判**：验收当时（2026-10-27 23:42）仓库确实还没建 git，该建议是对**当时事实**的记录；
   > 两天后完成初始化，但这条建议留在「遗留与建议」里没销账 ⇒ 读的人会以为仓库仍未纳管。
   > ⇒ 「遗留」条目要么闭环勾掉、要么注明完成日期，不留半开状态。
