@@ -75,6 +75,23 @@ magpie quota monkeycode                                            # 触发一�
 ⇒ **日常不需要本机电脑开机、不需要手动登录、不需要跑本机同步脚本。**
 旧的「本机计划任务 → 同步 cookie → 服务器重登」链路已被本节取代（见 `16` §六）。
 
+### 国际版没有 OAuth 桥（2026-11-03 实测，别再试）
+
+客户端源码把账号站写死为 `MC_DESKTOP_BAIZHI_URL` 默认 `https://baizhi.cloud`（不随地区变），
+但国际版的登录入口 `https://monkeycode-ai.net/api/v1/users/login` 302 出来的授权页
+**`client_id` 是空串**（国内版是 `client_id=monkeycode-ai`）：
+
+```
+GET  monkeycode-ai.net/api/v1/users/login?redirect=&inviter_id=
+→ 302 /oauth/authorize?client_id=&redirect_uri=https://monkeycode-ai.net/api/v1/users/baizhi/callback…
+GET  baizhi.cloud/api/v1/oauth/authorize?client_id=&…
+→ 400 {"code":400,"message":"参数错误"}
+```
+
+⇒ **国际版不能复用国内版的百智云会话来换会话**。国际版要自动续期只能靠**口令登录**
+（方式 2）；只想用起来就用方式 4 粘会话 Cookie，到期再粘。
+
+
 ## 四、多账号并存
 
 ```
@@ -120,11 +137,42 @@ basic 账号可见 = 6 + 8 = 14）。
 magpie plugin add /home/ubuntu/magpie-plugins/monkeycode
 magpie daemon restart                 # 重新加载插件
 
-magpie plugin login monkeycode 1      # 方式 1：读本机客户端登录态（keyless，零交互）
+magpie plugin login monkeycode 1      # 方式 1：读服务器上的客户端登录态（keyless，零交互）
 magpie plugin login monkeycode 2      # 方式 2：账号 + 口令
 magpie plugin login monkeycode 3      # 方式 3：手填 oma_ key + omas_ 密钥
-magpie plugin login monkeycode-intl 2 # 国际版：目前只有方式 2 可用
+magpie plugin login monkeycode-intl 4 # 方式 4：浏览器登录后粘贴会话 Cookie（国际版推荐）
 ```
+
+### 方式 4：浏览器登录后粘贴会话 Cookie（2026-11-03 新增）
+
+**为什么需要它**：国际版（以及国内版）**没有可调用的注册 API** —— 注册与登录都在网页端
+（百智云 / Google / GitHub / 账号密码 / 快速注册）。插件问「邮箱 + 口令」时，若账号是用
+百智云或 Google 注册的，用户**根本没有口令**，路就断了。
+
+方式 4 不猜口令，改成把「网页登录后的会话」接过来：
+
+1. 浏览器打开 `https://monkeycode-ai.net/login`（国内版是 `https://monkeycode-ai.com/login`），
+   用页面上的方式注册或登录；
+2. 进控制台后，devtools → Application → Cookies，复制 `monkeycode_ai_session` 的值；
+3. `magpie plugin login monkeycode-intl 4`，粘贴进去。
+
+插件会：校验会话（`GET /api/v1/users/status`）→ 在控制台**自动铸造**一把 `oma_` key +
+签名密钥（`POST /api/v1/users/ohmyagent/api-keys`）→ 存成账号。
+之后推理、查额度、签到都能用。会话到期再粘一次即可；若要**自动续期**，仍需方式 2 的口令
+（国际版没有百智云 OAuth 桥，这一点见 §三）。
+
+> 口令登录失败时，错误信息也会指向方式 4 —— 不是「口令错」，而是「你可能压根没有口令」。
+
+### 签到：两条通道都从插件里走（2026-11-03 修正）
+
+`auth.checkin` 的行为：
+
+1. 账号记录里没有会话时，**先试着续期**（会话 → 口令 → 百智云 OAuth 桥），拿到会话再签到，
+   而不是直接判 `ineligible`。历史记录、手填时没填 cookie 的账号因此能自愈。
+2. B 通道（官方云每日积分）与 A 通道（百智云每日临时额度）**都签**，且两条通道的结果
+   都会写进 `message`（此前 A 通道失败会被静默吞掉，界面上只剩 B 的「今日已签到」，
+   看着像 A 根本没跑）。
+
 
 环境变量（见 `plugins/monkeycode/README.md`）：
 
@@ -141,7 +189,7 @@ node 侧 `node --test --test-force-exit "test/**/*.test.mjs"` 同批用例。
 
 | 项 | 谁做 | 状态 |
 |---|---|---|
-| 国际版账号登录 | 用户（`magpie plugin login monkeycode-intl 2`，邮箱 + 口令） | ⏳ 服务器上还没有国际版账号 |
+| 国际版账号登录 | 用户（浏览器登录 `monkeycode-ai.net` 后 `magpie plugin login monkeycode-intl 4` 粘会话） | ⏳ 服务器上还没有国际版账号；该站**没有注册 API**，注册只能在网页端 |
 | B 通道 pro/ultra 档 | 用户（订阅升级） | ⏳ 当前账号只有 basic 档 |
 | `baizhi_session` 30 天到期后的重抓 | 用户（浏览器登录 baizhi.cloud / `relay-checkin --add`） | ⏳ 2026-11-06 前 |
 | 旧的本机同步链路（`scripts/sync-monkeycode-creds.ps1` + 计划任务 `magpie-sync-monkeycode`） | — | ⏳ 服务器已自主，**本机这条可以退役**（待用户确认） |

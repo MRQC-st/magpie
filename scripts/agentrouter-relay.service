@@ -1,0 +1,13 @@
+[Unit]
+Description=AgentRouter relay (Codex fingerprint headers + mihomo egress)
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/ubuntu/services/agentrouter-relay/relay.py
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

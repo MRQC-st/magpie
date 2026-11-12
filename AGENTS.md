@@ -1,17 +1,23 @@
 # AGENTS.md · magpie
 
 > **活总入口（状态结论层）**。冷启动先读这里 → 再读 `docs/00-项目总览.md`（结构层）→ 再读任务相关的
-> 主题文档（`docs/10`～`docs/18`）。时间线与证据在 `docs/99-变更日志.md`。
+> 主题文档（`docs/10`～`docs/19`）。时间线与证据在 `docs/99-变更日志.md`。
 > **本页不负责**：结构与分工表（在 `00`）、协议与实测（在主题文档）。
 
-## 当前状态（2026-10-30 实测服务器）
+## 当前状态（2026-11-06 实测服务器）
 
-- **网关在线**：magpie **0.1.2186**，systemd 用户服务；公网 `https://magpie.sunfolower.cn`；
+- **网关在线**：magpie **0.1.3105**，systemd 用户服务；公网 `https://magpie.sunfolower.cn`；
   网关 `:3425` / 网页 `:3430`。
 - **provider 覆盖面**：已登录 zcode(3) · lobster(7) · monkeycode 国内版(14) · baizhi(46，A 通道) ·
   u1s12api(3) · magicrew(16)/magicrew-intl(27) · genspark(45/8) · qoder(17)/qoder-cn(4) ·
   trae-cn(90)/trae-global(3) · minimax(4/2) · raccoon(10) · codearts(9) · autoclaw-cn(4) ·
-  devin(1) · copilot(23) · aihubmix。
+  devin(1) · copilot(23) · aihubmix · **agentrouter(3，responses API)**。
+- **AgentRouter 走 relay**：`agentrouter` 自定义厂商 → 本机 relay `127.0.0.1:8399`
+  （补 Codex 指纹头 + 经 mihomo 出网，绕阿里云 WAF）→ `agentrouter.org`；模型列表
+  `models.url` 动态拉取，`refresh-every 1d`。详见 `19`。
+- **AgentRouter 出口已固定**：mihomo 独立 `select` 组 `AgentRouter` → `日本-HY2-47`（出口
+  `163.227.161.157`，实测 10/10 稳定）；**决策不建 fallback**，失效时人工秒级切换。
+  另有 `127.0.0.0/8` / `::1` 回环 DIRECT 规则（客户端带 `HTTP_PROXY` 时访问本机 3425 才不会被转出成 502），详见 `19` §九。
 - **MonkeyCode 已脱离本机电脑**：服务器端 `auth.refresh` 自主续期；A/B 两条通道各自签到。
 - ⚠️ **`lobster` 只剩 7 个模型**（`12` 验收时是 30 个）—— 上游目录/权限变化，待核。
 - ⚠️ `monkeycode-intl`（国际版）未登录；`monkeycode` 是 basic 档 ⇒ 14 个模型（不是 bug）。
@@ -21,12 +27,13 @@
 | # | 事项 | 谁做 | 状态 | 出处 |
 |---|---|---|---|---|
 | 1 | 核 `lobster` 模型数 30 → 7 的原因（上游目录 / 账号权限 / 插件降级） | 我 | ⏳ | 本页「当前状态」 |
-| 2 | 登录 MonkeyCode 国际版账号（`magpie plugin login monkeycode-intl 2`） | 用户 | ⏳ | `17` §七 |
+| 2 | 登录 MonkeyCode 国际版账号 —— 该站**没有注册 API**，先在浏览器 `monkeycode-ai.net/login` 注册/登录，再 `magpie plugin login monkeycode-intl 4` 粘控制台会话 Cookie | 用户 | ⏳ | `17` §六 |
 | 3 | `baizhi_session`（30 天）到期前重抓 —— **2026-11-06 前** | 用户 | ⏳ | `16` §四 |
 | 4 | 退役旧的本机同步链路：`scripts/sync-monkeycode-creds.ps1` + Windows 计划任务 `magpie-sync-monkeycode` + 服务器 `magpie-monkeycode-refresh.timer` | 用户确认后我执行 | ⏳ | `16` §六、`17` §七 |
 | 5 | B 通道 pro/ultra 档（需订阅升级） | 用户 | ⏳ | `17` §五 |
 | 6 | 考虑给 B 挂 A 回落（`magpie provider fallback`） | 待定 | ⏳ | `16` §七 |
 | 7 | 文档体检：`python <skill>/references/scripts/docs_health.py D:\projects\magpie` → 0 问题 | 我 | ✅ 本轮已跑 | `00` §文档治理约定 |
+| 8 | AgentRouter 的 WAF / 出口节点 / 模型目录会变：变化时按 `19` §二 重跑三组对照；切换判定信号见 `19` §9.8 | 我 | ⏳ | `19` §八、§9.8 |
 
 ## 文档索引
 
@@ -44,6 +51,7 @@
 | MonkeyCode 两条通道与各自签到 | `docs/16-MonkeyCode双通道与签到.md` |
 | MonkeyCode 插件 fork、自主续期、多账号 | `docs/17-MonkeyCode插件接入与自主续期.md` |
 | **所有插件共用的宿主机制** | `docs/18-magpie插件宿主契约.md` |
+| AgentRouter 接入 / 指纹头 / 模型刷新 / 固定出口 / 回滚 | `docs/19-AgentRouter接入与模型刷新.md` |
 | 时间线与证据（append-only） | `docs/99-变更日志.md` |
 
 ## 关联项目（主题级指针）

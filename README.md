@@ -92,6 +92,18 @@ magpie provider add baizhi url=…/api/anthropic anthropic=…/api/anthropic res
 （插件的 `auth.checkin` 与 `scripts/baizhi-checkin.py` 都领）。
 双通道与签到的完整说明见 `docs/16-MonkeyCode双通道与签到.md`。
 
+### AgentRouter — 公益中转站（custom vendor + 本机 relay，非插件）
+
+服务器**直连会被阿里云 WAF 挡**，且上游要求 Codex CLI 指纹头。做法是：
+
+```
+magpie `agentrouter`（自定义厂商） → relay 127.0.0.1:8399（补指纹头） → mihomo → agentrouter.org
+```
+
+`models.url` 指向 relay，模型列表动态刷新（`magpie provider refresh agentrouter`，已设 `refresh-every 1d`）；
+当前 3 个模型（`gpt-5.6-sol` / `gpt-6-astra` / `gpt-6.1-sol`）**都要按 Responses API 标记**。
+接入、指纹头、实测与回滚步骤见 `docs/19-AgentRouter接入与模型刷新.md`。
+
 ## 凭据自动续期（现状）
 
 | 位置 | 单元 | 作用 | 状态 |

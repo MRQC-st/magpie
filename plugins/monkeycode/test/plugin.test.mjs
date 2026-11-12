@@ -1,4 +1,7 @@
 import { test, expect } from "./harness.mjs"
+import { mkdtempSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import {
   MonkeyCodeAuthPlugin as cnPlugin,
   MonkeyCodeIntlAuthPlugin as intlPlugin,
@@ -63,19 +66,20 @@ test("config declares the provider when absent", async () => {
   expect(cfg.provider.monkeycode.npm).toBe("@ai-sdk/anthropic")
 })
 
-test("three sign-in methods are offered, all keyless", async () => {
+test("four sign-in methods are offered, all keyless", async () => {
   const cn = await cnPlugin({})
-  expect(cn.auth.methods.length).toBe(3)
+  expect(cn.auth.methods.length).toBe(4)
   for (const m of cn.auth.methods) {
     // keyless ⇒ magpie 不从 stdin 要 API key
     expect(m.type).toBe("api")
     expect(m.keyless).toBe(true)
     expect(typeof m.authorize).toBe("function")
   }
-  // 下标是契约：1 读客户端配置 / 2 服务器端账密登录 / 3 手动填写
+  // 下标是契约：1 读客户端配置 / 2 服务器端账密登录 / 3 手动填写 / 4 粘会话 Cookie
   expect(cn.auth.methods[0].label).toContain("客户端登录态")
   expect(cn.auth.methods[1].label).toContain("服务器端登录")
   expect(cn.auth.methods[2].label).toContain("手动填写")
+  expect(cn.auth.methods[3].label).toContain("会话 Cookie")
 })
 
 test("the server-login method asks for an email and a password", async () => {
@@ -87,6 +91,40 @@ test("the server-login method asks for an email and a password", async () => {
   expect(cn.auth.methods[1].prompts[0].validate("a@b.com")).toBeUndefined()
   expect(cn.auth.methods[1].prompts[1].validate("123")).toBeTruthy()
   expect(cn.auth.methods[1].prompts[1].validate("123456")).toBeUndefined()
+})
+
+test("the cookie method mints a key from a pasted console session", async () => {
+  // 国际版没有注册 API：用户在网页端注册/登录后把会话粘进来，
+  // 插件自己校验会话并在控制台铸一把 key —— 不需要口令。
+  const json = (obj, status = 200) =>
+    new Response(JSON.stringify(obj), { status, headers: { "Content-Type": "application/json" } })
+  const seen = []
+  const fakeFetch = async (url, init) => {
+    const u = String(url)
+    seen.push({ u, init })
+    if (u.endsWith("/api/v1/users/status"))
+      return json({ code: 0, data: { user: { email: "intl@example.com", id: "u9" } } })
+    if (u.endsWith("/api/v1/users/ohmyagent/api-keys"))
+      return json({ code: 0, data: { id: "k9", api_key: "oma_9", signing_secret: "omas_9" } })
+    return json({ code: 0, data: {} })
+  }
+  const intl = await intlPlugin({}, { fetch: fakeFetch })
+  const out = await intl.auth.methods[3].authorize({ cookie: "sess-intl" })
+  expect(out.type).toBe("success")
+  expect(out.refresh).toBe("oma_9")
+  expect(out.access).toBe("omas_9")
+  expect(out.metadata.cookie).toBe("sess-intl")
+  expect(out.metadata.email).toBe("intl@example.com")
+  expect(out.metadata.base).toContain("monkeycode-ai.net")
+  expect(out.expires).toBeGreaterThan(Date.now())
+})
+
+test("the cookie method rejects a session the console will not accept", async () => {
+  const fakeFetch = async () => new Response("Unauthorized", { status: 401 })
+  const intl = await intlPlugin({}, { fetch: fakeFetch })
+  const out = await intl.auth.methods[3].authorize({ cookie: "bogus" })
+  expect(out.type).toBe("failed")
+  expect(out.error).toContain("会话")
 })
 
 test("refreshLead is set so magpie renews before the session lapses", async () => {
@@ -157,10 +195,68 @@ test("usage without a cookie says so instead of guessing", async () => {
   expect(u.signIn).toBe("kept")
 })
 
-test("checkin without a cookie is ineligible, not a failure", async () => {
-  const cn = await cnPlugin({})
+test("checkin is ineligible when there is no cookie and renewal cannot help", async () => {
+  // 账号记录里没有会话、也没有口令/百智云会话 ⇒ 只能报「不可签」。
+  // 必须隔离环境：否则会读到本机真实的 cookie 文件（测试就不再是单测了）。
+  const tmp = mkdtempSync(join(tmpdir(), "mc-checkin-"))
+  const cn = await cnPlugin({}, {
+    env: {
+      APPDATA: tmp,
+      MONKEYCODE_COOKIE_FILE: join(tmp, "none.json"),
+      MONKEYCODE_CREDENTIALS_FILE: join(tmp, "cred.json"),
+      BAIZHI_COOKIE_FILE: join(tmp, "bz.json"),
+    },
+    fetch: async () => new Response("Unauthorized", { status: 401 }),
+  })
   const r = await cn.auth.checkin(async () => ({ type: "oauth", key: "oma_k", metadata: {} }))
   expect(r.outcome).toBe("ineligible")
+})
+
+test("checkin renews a missing session before giving up", async () => {
+  // 账号记录里没有会话，但服务器上的 cookie 文件里有 ⇒ 先续期（换新 key）再签到。
+  const tmp = mkdtempSync(join(tmpdir(), "mc-checkin-"))
+  const cookieFile = join(tmp, "cookies.json")
+  writeFileSync(
+    cookieFile,
+    JSON.stringify([
+      {
+        name: "monkeycode_" + "ai_session",
+        value: "sess-1",
+        domain: "monkeycode-ai.com",
+        path: "/",
+        expires: new Date(Date.now() + 86400000).toISOString(),
+      },
+    ]),
+  )
+  const json = (obj, status = 200) =>
+    new Response(JSON.stringify(obj), { status, headers: { "Content-Type": "application/json" } })
+  const fakeFetch = async (url) => {
+    const u = String(url)
+    if (u.endsWith("/api/v1/users/status"))
+      return json({ code: 0, data: { user: { email: "a@b.c", id: "u1" } } })
+    if (u.endsWith("/api/v1/users/ohmyagent/api-keys"))
+      return json({ code: 0, data: { id: "k1", api_key: "oma_new", signing_secret: "omas_new" } })
+    if (u.endsWith("/api/v1/users/wallet"))
+      return json({ code: 0, data: { balance: 1000, daily_token_balance: 10, daily_token_limit: 10 } })
+    if (u.endsWith("/api/v1/users/subscription")) return json({ code: 0, data: { plan: "basic" } })
+    if (u.includes("/wallet/checkin")) return json({ code: 0, data: { checked_in: true } })
+    return json({ code: 0, data: {} })
+  }
+  const cn = await cnPlugin({}, {
+    env: {
+      APPDATA: tmp,
+      MONKEYCODE_COOKIE_FILE: cookieFile,
+      MONKEYCODE_CREDENTIALS_FILE: join(tmp, "cred.json"),
+      BAIZHI_COOKIE_FILE: join(tmp, "bz.json"),
+    },
+    fetch: fakeFetch,
+  })
+  const r = await cn.auth.checkin(async () => ({
+    type: "oauth",
+    key: "oma_k",
+    metadata: { email: "a@b.c", uid: "u1" },
+  }))
+  expect(r.outcome).toBe("done")
 })
 
 test("models() keeps the list magpie built when the console is unreachable", async () => {

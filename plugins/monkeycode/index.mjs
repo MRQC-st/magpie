@@ -299,7 +299,7 @@ function buildPlugin(site) {
               error:
                 `服务器上的客户端配置里没有 **${s.label}** 的凭据` +
                 `（要找的端点是 ${s.proxy}）。\n` +
-                "若你是国际版账号，请用「服务器端登录」方式（邮箱 + 口令）。",
+                "若你是国际版账号，请用「浏览器登录后粘贴会话 Cookie」方式（方式 4）。",
             }
           }
           for (const dir of mine) {
@@ -373,7 +373,13 @@ function buildPlugin(site) {
           try {
             const r = await passwordLogin(s.console, email, password, { fetchImpl })
             if (!r.ok) {
-              return { type: "failed", error: `登录失败：${r.message || `HTTP ${r.http}`}` }
+              return {
+                type: "failed",
+                error:
+                  `登录失败：${r.message || `HTTP ${r.http}`}。` +
+                  "国际版没有注册接口，也没有默认口令 —— 若你还没注册，请先在浏览器打开 " +
+                  `${s.console}/login 注册/登录，再用「浏览器登录后粘贴会话 Cookie」（方式 4）。`,
+              }
             }
             const session = r.session
             const minted = await mintApiKey(s.console, session, { fetchImpl })
@@ -472,6 +478,67 @@ function buildPlugin(site) {
           }
         },
       },
+      {
+        // 方式 4：**浏览器登录后粘贴会话 Cookie** —— 不需要口令，也不依赖注册接口。
+        //
+        // 为什么要这条：国际版（以及国内版）**没有可调用的注册 API** —— 注册/登录
+        // 都在网页端完成（百智云 / Google / GitHub / 账号密码 / 快速注册）。
+        // 所以插件不猜口令，而是把「网页登录后的会话」接过来：
+        //   校验会话 → 在控制台**自动铸造**一把 oma_ key + 签名密钥 → 存成账号。
+        // 之后推理、查额度、签到都能用；会话到期再粘一次即可（口令登录可自动续期）。
+        type: "api",
+        keyless: true,
+        label: "浏览器登录后粘贴会话 Cookie（自动铸造 key，国际版推荐）",
+        prompts: [
+          {
+            type: "password",
+            key: "cookie",
+            message: `会话 Cookie（浏览器登录 ${s.console} 后复制 ${SESSION_COOKIE} 的值）`,
+            placeholder: `${SESSION_COOKIE} 的值`,
+            validate: (v) => (String(v ?? "").trim() ? undefined : "不能为空"),
+          },
+        ],
+        authorize: async (inputs) => {
+          const cookie = normalizeCookie(inputs?.cookie)
+          if (!cookie) return { type: "failed", error: "缺会话 Cookie。" }
+          try {
+            const st = await fetchStatus(s.console, cookie, { fetchImpl })
+            const u = userIdentity(st)
+            const minted = await mintApiKey(s.console, cookie, { fetchImpl })
+            const cookieFile = String(env.MONKEYCODE_COOKIE_FILE ?? "").trim()
+            if (cookieFile) {
+              try {
+                writeSessionCookie(cookieFile, cookie, { domain: hostOf(s.console) })
+              } catch (e) {
+                log("warn", `会话写回失败：${e?.message ?? e}`)
+              }
+            }
+            return {
+              type: "success",
+              refresh: minted.key,
+              access: minted.secret,
+              expires: Date.now() + 6 * 24 * 3600 * 1000,
+              uid: u.id,
+              metadata: {
+                secret: minted.secret,
+                cookie,
+                base: s.proxy,
+                email: u.email,
+                uid: u.id,
+                keyId: minted.id,
+                source: "cookie",
+              },
+            }
+          } catch (e) {
+            return {
+              type: "failed",
+              error:
+                `会话无效或铸造 key 失败：${e?.message ?? e}。` +
+                `请确认复制的是 ${s.console} 登录后的 ${SESSION_COOKIE}，且没有过期。`,
+            }
+          }
+        },
+      },
     ]
 
     // ---- 续期 --------------------------------------------------------------
@@ -545,9 +612,28 @@ function buildPlugin(site) {
 
     const makeCheckin = () => async (getAuth) => {
       const auth = await getAuth()
-      const cred = credentialOf(auth)
+      let cred = credentialOf(auth)
       if (!cred.cookie) {
-        return { outcome: "ineligible", message: "未保存控制台 Cookie，无法查询签到状态。" }
+        // 账号记录里没有会话（历史记录 / 手填时没填 / 会话过期被静默丢弃）——
+        // 先试着把会话要回来，再判「不可签」。会话有效就铸新 key，
+        // 过期就用服务器上存的口令或百智云 OAuth 桥重建。
+        try {
+          const next = await renewAccount(s, { auth, env, fetchImpl, log })
+          cred = {
+            ...cred,
+            cookie: String(next?.metadata?.cookie ?? ""),
+            key: next?.key || cred.key,
+            secret: String(next?.metadata?.secret ?? "") || cred.secret,
+          }
+        } catch (e) {
+          return {
+            outcome: "ineligible",
+            message: `未保存控制台 Cookie，且自动续期失败：${e?.message ?? e}`,
+          }
+        }
+        if (!cred.cookie) {
+          return { outcome: "ineligible", message: "未保存控制台 Cookie，无法查询签到状态。" }
+        }
       }
       // B 通道（官方云）：领每日积分。
       let b
@@ -565,8 +651,15 @@ function buildPlugin(site) {
           if (a.outcome === "claimed") {
             return { outcome: b.outcome, message: `${b.message}；${a.message}` }
           }
+          // A 通道没领到（已领过 / 会话过期 / 上游报错）也要说出来，
+          // 否则界面上只剩 B 的一句「今日已签到」，看着像 A 根本没跑。
+          return {
+            outcome: b.outcome,
+            message: `${b.message}；百智云：${a.message || a.outcome}`,
+          }
         } catch (e) {
           log("warn", `A 通道每日临时额度领取失败：${e?.message ?? e}`)
+          return { outcome: b.outcome, message: `${b.message}；百智云领取失败：${e?.message ?? e}` }
         }
       }
       return b
