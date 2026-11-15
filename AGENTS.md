@@ -35,7 +35,7 @@
 | 7 | 文档体检：`python <skill>/references/scripts/docs_health.py D:\projects\magpie` → 0 问题 | 我 | ✅ 本轮已跑 | `00` §文档治理约定 |
 | 8 | AgentRouter 的 WAF / 出口节点 / 模型目录会变：变化时按 `19` §二 重跑三组对照；切换判定信号见 `19` §9.8 | 我 | ⏳ | `19` §八、§9.8 |
 | 9 | **LobsterAI 已封号（2026-11-15，用户发现）**——服务器版封号根因审计见 model-reverse `docs/field-journal/2026-11-15_lobsterai-server-ban-forensics.md`：数据中心 IP 为主因（无代码解）+ 两处代码差异（签到 `platform=linux` 矛盾、缺 `X-LobsterAI-Client-*` 两头）+ 30min tick 频率放大。**待执行**：① `lib/checkin.mjs` call() 补两身份头 ② `PLATFORM` 改可注入默认 win32 ③ lobster 签到降频（非当日幂等早退）④ 账号处置待用户（解封/换号），服务器侧 lobster 建议暂停签到防连带 | 我（代码）/ 用户（账号） | ⏳ | model-reverse field-journal 2026-11-15 |
-| 10 | monkeycode 插件签到积分显示已补（钱包差额法，4 单测，2026-11-15）——**待部署**：`magpie plugin` 目录同步 + `magpie daemon restart` 后生效 | 我 | 🔜 代码已改待部署 | `test/checkin-credit.test.mjs` |
+| 10 | monkeycode 插件签到积分显示（钱包差额法，4 单测）——✅ **已部署**（2026-11-15：快照发现服务器版比本地仓库**新**（11-09 微信扫码登录/密码重置邮件/方式 5 等未入库），故未整文件覆盖，改在**服务器版之上**精准替换 `performCheckin` 段；服务器端假上游端到端验证 `credit:100` 产出 ✅，daemon restart ✅；备份 `/tmp/console.mjs.bak-1115`；服务器快照已入本地仓 `plugins/monkeycode-server-snapshot/`）。⚠️ 服务器侧仍有未入库改动（wechat-login.mjs 等）——下次改 monkeycode 插件**必须先拉服务器快照**，勿用本地 HEAD 覆盖 | 我 | ✅ 2026-11-15 | `plugins/monkeycode-server-snapshot/` |
 
 ## 文档索引
 
