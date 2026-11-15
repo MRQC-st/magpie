@@ -558,13 +558,20 @@ function buildPlugin(site) {
           const login = await startWechatLogin(s.account, { fetchImpl })
           log(
             "info",
-            `微信扫码登录：请在微信里打开 ${login.authUrl} 并确认（约 5 分钟内有效）`,
+            `微信扫码登录：浏览器将打开二维码图片，用手机微信扫码并确认（约 5 分钟内有效）`,
           )
           return {
-            url: login.authUrl,
+            // 🔴 关键：给 magpie UI 打开的必须是**二维码图片直链**（同一 uuid），
+            // 不能是授权页 authUrl —— qrconnect 页面每次加载都会生成**新的**
+            // uuid 并重绘二维码，用户扫「他自己浏览器加载出来的码」，插件轮询
+            // 的却是 startWechatLogin 的 uuid ⇒ 两者永远错位，用户侧「扫描
+            // 成功」、服务器侧永远 waiting（2026-11-16 实测踩坑）。
+            // 图片直链 https://open.weixin.qq.com/connect/qrcode/<uuid> 是
+            // startWechatLogin 里抓到的**同一个 uuid**，扫它必然命中。
+            url: login.qrUrl,
             instructions:
-              "用手机微信打开上面的链接并确认登录（或浏览器打开后在微信里扫二维码）。" +
-              "确认后这里会自动完成，约 5 分钟内有效。",
+              "浏览器已打开微信登录二维码图片：用手机微信「扫一扫」扫这张图，并在手机上点「确认登录」。" +
+              "确认后这里会自动完成（约 5 分钟内有效）。若浏览器没有自动打开，手动访问上面的图片链接。",
             method: "auto",
             callback: async () => {
               // 轮询到出结果为止（微信授权页的二维码约 5 分钟过期）。
