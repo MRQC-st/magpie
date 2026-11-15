@@ -297,18 +297,39 @@ function checkinData(payload) {
 }
 
 // performCheckin 领今天的积分。幂等：已签过就只报状态。
+// 回执里没有奖励数额 —— **绝不编一个积分数字**；改用签到前后钱包差额如实计算，
+// 差额拿不到（钱包接口失败 / 上游记账延迟）就不报数额，只报状态。
 export async function performCheckin(consoleBase, cookie, { fetchImpl = fetch } = {}) {
   const signal = AbortSignal.timeout(45000)
   const path = "/api/v1/users/wallet/checkin"
   if (checkinData(await checkinJSON(consoleBase, cookie, path, undefined, signal, fetchImpl))) {
     return { outcome: "done", message: "今日已签到" }
   }
+  const before = await walletBalanceSafe(consoleBase, cookie, { fetchImpl })
   const token = await captchaToken(consoleBase, { fetchImpl, signal })
   if (!checkinData(await checkinJSON(consoleBase, cookie, path, { captcha_token: token }, signal, fetchImpl))) {
     throw new Error("签到未生效（checked_in=false）")
   }
-  // 回执里没有奖励数额 —— **绝不编一个积分数字**。
-  return { outcome: "claimed", message: "签到成功" }
+  const after = await walletBalanceSafe(consoleBase, cookie, { fetchImpl })
+  const delta = before !== null && after !== null ? Math.round((after - before) / 1000) : null
+  return {
+    outcome: "claimed",
+    credit: delta !== null && delta !== 0 ? delta : undefined,
+    message: delta !== null && delta !== 0
+      ? `签到成功（钱包差额 +${delta} 积分）`
+      : "签到成功",
+  }
+}
+
+// walletBalanceSafe 读钱包余额（1/1000 积分），失败返回 null —— 签到的成败不依赖它。
+async function walletBalanceSafe(consoleBase, cookie, { fetchImpl = fetch } = {}) {
+  try {
+    const data = await fetchWallet(consoleBase, cookie, { fetchImpl })
+    const bal = Number(data?.balance)
+    return Number.isFinite(bal) ? bal : null
+  } catch {
+    return null
+  }
 }
 
 // 并发按键合并（同一账号），失败后允许重试。

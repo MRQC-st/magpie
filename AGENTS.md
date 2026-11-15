@@ -26,14 +26,16 @@
 
 | # | 事项 | 谁做 | 状态 | 出处 |
 |---|---|---|---|---|
-| 1 | 核 `lobster` 模型数 30 → 7 的原因（上游目录 / 账号权限 / 插件降级） | 我 | ⏳ | 本页「当前状态」 |
+| 1 | 核 `lobster` 模型数 30 → 7 的原因（上游目录 / 账号权限 / 插件降级）——**大概率是账号封号连带（2026-11-15 事故，见待办 9）** | 我 | ⏳ | 本页「当前状态」 |
 | 2 | 登录 MonkeyCode 国际版账号 —— 该站**没有注册 API**，先在浏览器 `monkeycode-ai.net/login` 注册/登录，再 `magpie plugin login monkeycode-intl 4` 粘控制台会话 Cookie | 用户 | ⏳ | `17` §六 |
-| 3 | `baizhi_session`（30 天）到期前重抓 —— **2026-11-06 前** | 用户 | ⏳ | `16` §四 |
+| 3 | `baizhi_session`（30 天）到期前重抓 —— **2026-11-06 前已过期**；relay-checkin 本机已于 2026-11-15 重抓（`probe/baizhi_adapter.py --add` 成功），需把**新 session 同步到服务器**（重跑 `import-provider-creds.ps1` 或按 `16` §四流程） | 用户（本机浏览器登录后同步脚本） | ⏳ | `16` §四 |
 | 4 | 退役旧的本机同步链路：`scripts/sync-monkeycode-creds.ps1` + Windows 计划任务 `magpie-sync-monkeycode` + 服务器 `magpie-monkeycode-refresh.timer` | 用户确认后我执行 | ⏳ | `16` §六、`17` §七 |
 | 5 | B 通道 pro/ultra 档（需订阅升级） | 用户 | ⏳ | `17` §五 |
 | 6 | 考虑给 B 挂 A 回落（`magpie provider fallback`） | 待定 | ⏳ | `16` §七 |
 | 7 | 文档体检：`python <skill>/references/scripts/docs_health.py D:\projects\magpie` → 0 问题 | 我 | ✅ 本轮已跑 | `00` §文档治理约定 |
 | 8 | AgentRouter 的 WAF / 出口节点 / 模型目录会变：变化时按 `19` §二 重跑三组对照；切换判定信号见 `19` §9.8 | 我 | ⏳ | `19` §八、§9.8 |
+| 9 | **LobsterAI 已封号（2026-11-15，用户发现）**——服务器版封号根因审计见 model-reverse `docs/field-journal/2026-11-15_lobsterai-server-ban-forensics.md`：数据中心 IP 为主因（无代码解）+ 两处代码差异（签到 `platform=linux` 矛盾、缺 `X-LobsterAI-Client-*` 两头）+ 30min tick 频率放大。**待执行**：① `lib/checkin.mjs` call() 补两身份头 ② `PLATFORM` 改可注入默认 win32 ③ lobster 签到降频（非当日幂等早退）④ 账号处置待用户（解封/换号），服务器侧 lobster 建议暂停签到防连带 | 我（代码）/ 用户（账号） | ⏳ | model-reverse field-journal 2026-11-15 |
+| 10 | monkeycode 插件签到积分显示已补（钱包差额法，4 单测，2026-11-15）——**待部署**：`magpie plugin` 目录同步 + `magpie daemon restart` 后生效 | 我 | 🔜 代码已改待部署 | `test/checkin-credit.test.mjs` |
 
 ## 文档索引
 
