@@ -43,7 +43,9 @@ import {
   CHANNEL_PREFIX,
   TIERS,
   SESSION_COOKIE,
+  ACCOUNT_COOKIE,
 } from "./lib/constants.mjs"
+import { writeFileSync, renameSync } from "node:fs"
 import {
   credentialOf,
   readLocalCredential,
@@ -620,12 +622,30 @@ function buildPlugin(site) {
                 log("warn", `会话写回失败：${e?.message ?? e}`)
               }
             }
-            const acctFile = accountCookieFile(env)
-            if (acctFile) {
-              try {
-                writeAccountCookie(acctFile, bzValue)
-              } catch (e) {
-                log("warn", `百智云会话写回失败：${e?.message ?? e}`)
+            // 百智云会话写回：accountCookieFile 的签名是 **dir（文件路径）**，
+            // 传 env 对象会让 dirname() 抛 "The path property must be of type
+            // string, got object"（2026-11-16 实测）。用 cookiePaths(env) 的
+            // 第一个 baizhi-cookies.json 路径；lib 里没有 writeAccountCookie，
+            // 直接原子写 JSON（与 writeSessionCookie 同形状）。
+            {
+              const bzFile = cookiePaths(env).find((p) => p.endsWith("baizhi-cookies.json"))
+              if (bzFile) {
+                try {
+                  const items = readCookieFile(bzFile)
+                  const out = items.filter((it) => it?.name !== ACCOUNT_COOKIE)
+                  out.push({
+                    name: ACCOUNT_COOKIE,
+                    value: bzValue,
+                    domain: hostOf(s.account ?? "https://baizhi.cloud"),
+                    path: "/",
+                    expires: new Date(Date.now() + 30 * 24 * 3600 * 1000).toISOString(),
+                  })
+                  const tmp2 = bzFile + ".tmp"
+                  writeFileSync(tmp2, JSON.stringify(out, null, 2), { mode: 0o600 })
+                  renameSync(tmp2, bzFile)
+                } catch (e) {
+                  log("warn", `百智云会话写回失败：${e?.message ?? e}`)
+                }
               }
             }
             return {
