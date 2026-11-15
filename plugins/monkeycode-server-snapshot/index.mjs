@@ -83,6 +83,7 @@ import {
   walletToUsage,
   checkinFor,
   performCheckin,
+  bridgeLogin,
   mintApiKey,
   passwordLogin,
   requestPasswordReset,
