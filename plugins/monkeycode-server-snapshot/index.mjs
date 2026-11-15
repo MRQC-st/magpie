@@ -837,8 +837,8 @@ function buildPlugin(site) {
         const plan = sub?.plan ? String(sub.plan) : ""
         const out = { ...walletToUsage(wallet, { plan: plan || s.short }), signIn: "kept" }
         if (plan) out.plan = `${s.short} · ${plan}`
-        // A 通道的余额也报出来（另一个钱包）。
-        const bz = baizhiCookieOf(env)
+        // A 通道的余额也报出来（另一个钱包）——按槽隔离。
+        const bz = bzFor(auth, env)
         if (bz) {
           try {
             const bal = await fetchBaizhiBalance(bz, { fetchImpl })
@@ -861,7 +861,20 @@ function buildPlugin(site) {
       }
     }
 
-    // ---- 签到 --------------------------------------------------------------
+    // ---- A 通道百智云会话：按账号槽隔离 -------------------------------------
+
+// bzFor 取**本账号槽**的百智云会话：优先槽内 metadata.bz_cookie（扫码登录时
+// 随槽落盘），回退全局 baizhiCookieOf(env)（老数据兼容 + 桥会话兜底）。
+// 为什么必须按槽：百智云积分是**按账号隔离**的，两个微信号两个钱包；
+// 全局单槽文件只存最后一次登录者的会话，多账号下会互相顶掉
+// （2026-11-16 实测：扫码登录第二个微信后，第一个号的 A 通道签到丢失）。
+function bzFor(auth, env) {
+  const own = String(auth?.metadata?.bz_cookie ?? "").trim()
+  if (own) return own
+  return baizhiCookieOf(env)
+}
+
+// ---- 签到 --------------------------------------------------------------
 
     const makeCheckin = () => async (getAuth) => {
       const auth = await getAuth()
@@ -896,8 +909,8 @@ function buildPlugin(site) {
         return { outcome: "failed", message: e?.message ?? String(e) }
       }
       // A 通道（百智云）：领每日临时额度。两条通道的余额来自两个钱包，
-      // 不领 A 的话 A 通道会一直 `400 余额不足`。
-      const bz = baizhiCookieOf(env)
+      // 不领 A 的话 A 通道会一直 `400 余额不足`。按槽隔离（bzFor）。
+      const bz = bzFor(auth, env)
       if (bz) {
         try {
           const a = await claimBaizhiDailyCredit(bz, { fetchImpl })
