@@ -25,12 +25,43 @@
 //     与二维码 URL 交给登录说明，用户在自己手机/浏览器打开即可。
 
 import { ACCOUNT_COOKIE } from "./constants.mjs"
+import https from "node:https"
 
 const WX_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36"
 const TIMEOUT = 30_000
 const POLL_INTERVAL_MS = 2_000
 const POLL_DEADLINE_MS = 3 * 60_000
+
+// ⚠️ 服务器侧实测坑（2026-11-15）：微信长轮询域名是 `lp.<授权页域>` —— 百智云用
+//   `lp.baizhi.cloud`，但该域**不在** CLB 证书的 SAN 里（SAN 只有 baizhi.cloud /
+//   www.baizhi.cloud）⇒ Node 内置 fetch（undici）证书 hostname 校验直接
+//   ERR_TLS_CERT_ALTNAME_INVALID，扫码后状态轮询全部失败（"The operation was
+//   aborted" 刷屏）。curl -k / 浏览器都放行（浏览器根本不把这个域当证书错误）。
+//   修复：对 `lp.` 子域走 https.request + rejectUnauthorized:false 的兜底 fetch。
+//   仅豁免 lp. 子域，其余域名仍走全局 fetch 正常校验。
+const lpRelaxedFetch = (url, init = {}) => {
+  const u = new URL(url)
+  if (!u.hostname.startsWith("lp.")) return fetch(url, init)
+  return new Promise((resolve, reject) => {
+    const req = https.request(url, { ...init, rejectUnauthorized: false, headers: init.headers ?? {} }, (res) => {
+      const chunks = []
+      res.on("data", (c) => chunks.push(c))
+      res.on("end", () =>
+        resolve(new Response(Buffer.concat(chunks).toString("utf8"), {
+          status: res.statusCode,
+          headers: res.headers,
+        })),
+      )
+    })
+    req.on("error", reject)
+    req.setTimeout(TIMEOUT, () => req.destroy(new Error("lp 轮询超时")))
+    if (init.signal) {
+      init.signal.addEventListener("abort", () => req.destroy(new DOMException("aborted", "AbortError")), { once: true })
+    }
+    req.end()
+  })
+}
 
 // startWechatLogin 走第 1~2 步，返回扫码会话。
 // 失败抛 Error（message 直接给人看）。
@@ -72,7 +103,7 @@ export async function pollWechatLogin(loginState, { fetchImpl = fetch } = {}) {
   const host = new URL(authUrl).host
   const lpUrl = `https://lp.${host}/connect/l/qrconnect?uuid=${encodeURIComponent(uuid)}&_=${Date.now()}`
 
-  const res = await fetchImpl(lpUrl, {
+  const res = await lpRelaxedFetch(lpUrl, {
     headers: { "User-Agent": WX_UA, Referer: authUrl },
     signal: AbortSignal.timeout(TIMEOUT),
   })
