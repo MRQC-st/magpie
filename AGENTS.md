@@ -58,6 +58,11 @@
 
 ## 关联项目（主题级指针）
 
+> ⚠️ **仓库拓扑（2026-11-15 勘误）**：`origin`（`MRQC-st/magpie`）是 **yetone/magpie 官方仓（36k 星）的 fork**，
+> 其 `main` = 上游源码（与本项目文档**无共同祖先**）。本仓的文档/插件提交**不可 push 到 origin/main**；
+> 已推为独立分支 **`origin/workstation-docs`**（本仓 main 的完整镜像，2026-11-15 起）。上游更新用
+> `git fetch origin` 取 tags/源码做版本对照，**绝不 merge/rebase 上游 main 进本仓 main**。
+
 | 项目 | 主题 | 关系 | 本项目对应 |
 |---|---|---|---|
 | `D:\projects\model-reverse` | MonkeyCode 协议与计费 | **SSOT 在对方**（协议/端点/模型档位/单位换算）；本项目只写 magpie 侧接入 | `16` §一、`17` §五 |
