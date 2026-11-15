@@ -28,7 +28,7 @@
 |---|---|---|---|---|
 | 1 | 核 `lobster` 模型数 30 → 7 的原因（上游目录 / 账号权限 / 插件降级）——**大概率是账号封号连带（2026-11-15 事故，见待办 9）** | 我 | ⏳ | 本页「当前状态」 |
 | 2 | 登录 MonkeyCode 国际版账号 —— 该站**没有注册 API**，先在浏览器 `monkeycode-ai.net/login` 注册/登录，再 `magpie plugin login monkeycode-intl 4` 粘控制台会话 Cookie | 用户 | ⏳ | `17` §六 |
-| 3 | `baizhi_session`（30 天）到期前重抓 —— **2026-11-06 前已过期**；relay-checkin 本机已于 2026-11-15 重抓（`probe/baizhi_adapter.py --add` 成功），需把**新 session 同步到服务器**（重跑 `import-provider-creds.ps1` 或按 `16` §四流程） | 用户（本机浏览器登录后同步脚本） | ⏳ | `16` §四 |
+| 3 | ~~`baizhi_session` 重抓~~ ✅ 2026-11-15/16 闭环：本机重抓 + scp 到服务器 + 触发签到验证 `[already] 已领（100 积分）`。⚠️ 注意多账号隔离已修复（DEC-MAG-019 ④），百智会话按槽存 `metadata.bz_cookie`；下次到期（约 2026-12-15）用户浏览器重登 baizhi.cloud 后重新扫码或 `--add` 即可 | 用户（到期时浏览器重登） | ✅ 2026-11-16 | `16` §四 |
 | 4 | 退役旧的本机同步链路：`scripts/sync-monkeycode-creds.ps1` + Windows 计划任务 `magpie-sync-monkeycode` + 服务器 `magpie-monkeycode-refresh.timer` | 用户确认后我执行 | ⏳ | `16` §六、`17` §七 |
 | 5 | B 通道 pro/ultra 档（需订阅升级） | 用户 | ⏳ | `17` §五 |
 | 6 | 考虑给 B 挂 A 回落（`magpie provider fallback`） | 待定 | ⏳ | `16` §七 |
