@@ -1165,8 +1165,12 @@ func revalidated(next http.Handler) http.Handler {
 var pageFile = lazyre.New(`(src|href)="([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*\.(?:js|css))"`)
 
 // versionedPage is the page with each of its own scripts and stylesheets
-// named with its content's hash; one not among the page's files (boot.js,
-// which the API writes) keeps its name.
+// named with its content's hash; boot.js, which the API writes, is named
+// with the version serving the page instead: a page left open when magpie
+// updates itself reloads once its version differs (servedAnew), and a
+// browser may answer that reload from its memory cache with the boot.js of
+// the version before, whose pageVersion then never matches and reloads for
+// ever. The version in its address makes the reload ask for a new one.
 // staticSum is the sha256 of a static file, or with root of the page as
 // versionedPage names its files, and that page: made once in a build,
 // whose files never change (staticFixed). Each load read every file
@@ -1210,6 +1214,9 @@ type staticFile struct {
 func versionedPage(page []byte) []byte {
 	return pageFile.ReplaceAllFunc(page, func(m []byte) []byte {
 		g := pageFile.FindSubmatch(m)
+		if string(g[2]) == "boot.js" {
+			return []byte(fmt.Sprintf(`%s="boot.js?v=%s"`, g[1], url.QueryEscape(Version)))
+		}
 		sum, _, ok := staticSum(string(g[2]), false)
 		if !ok {
 			return m

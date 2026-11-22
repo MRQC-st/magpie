@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -113,10 +114,32 @@ func TestPageNamesItsFilesByContent(t *testing.T) {
 			t.Errorf("/%s: %d, %d bytes, want the file", want, rec.Code, rec.Body.Len())
 		}
 	}
-	if !strings.Contains(body, `src="boot.js"`) {
-		t.Error("boot.js is the API's, asked for afresh each time: it keeps its name")
+	if !strings.Contains(body, `src="boot.js?v=`+url.QueryEscape(Version)+`"`) {
+		t.Error("boot.js is the API's, named with the version serving it so a page reloading after an update asks for a new one")
 	}
 	if again := get("/", page.Header().Get("ETag")); again.Code != http.StatusNotModified {
 		t.Errorf("/ asked again with its ETag: %d, want 304", again.Code)
+	}
+}
+
+// A page left open when magpie updates itself asks for boot.js afresh on
+// its reload: the address carries the version now serving, which the
+// browser never held. Named like the page's own files by content, boot.js
+// kept one address across versions, and a browser answering the reload
+// from its memory cache with the old one gave the page the old pageVersion
+// again: servedAnew saw them differ and reloaded, every few seconds, until
+// a hard reload or a new tab.
+func TestBootJSAddressFollowsVersion(t *testing.T) {
+	was := Version
+	defer func() { Version = was }()
+	Version = "0.1.4667"
+	page := []byte(`<script src="boot.js"></script>`)
+	got := string(versionedPage(page))
+	if want := `src="boot.js?v=0.1.4667"`; !strings.Contains(got, want) {
+		t.Errorf("boot.js: %s, want %s", got, want)
+	}
+	Version = "0.1.4668"
+	if next := string(versionedPage(page)); next == got {
+		t.Errorf("boot.js still names %s after the version changed", next)
 	}
 }
