@@ -1,0 +1,14 @@
+[Unit]
+Description=Genspark web bridge (ask_proxy to OpenAI chat completions)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -u /home/ubuntu/services/genspark-web-bridge.py
+WorkingDirectory=/home/ubuntu/services
+Restart=always
+RestartSec=3
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target
